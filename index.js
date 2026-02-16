@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 10000;
 const members = new Map(); // key: userId -> {id, name, username, display, addedAt}
 
 function buildDisplay(user) {
- const name = ${user.first_name} ${user.last_name || ""}.trim() || "Unknown";
+const name = ${user.first_name} ${user.last_name || ""}.trim() || "Unknown";
   const username = user.username ? @${user.username} : "";
   // ✅ Duplicate-safe label:
   // username ရှိရင် ( @username ) ၊ မရှိရင် (ID:xxxx)
