@@ -18,15 +18,11 @@ app.post("/test", (req, res) => {
     return res.json({ message: "No user data" });
   }
 
-  const firstName = user.first_name || "";
-  const lastName = user.last_name || "";
-
-const name = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Unknown";
-
+  const name = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Unknown";
 
   res.json({
     success: true,
-    name: name
+    name: name,
   });
 });
 
