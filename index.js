@@ -21,7 +21,8 @@ app.post("/test", (req, res) => {
   const firstName = user.first_name || "";
   const lastName = user.last_name || "";
 
-  const name = ${firstName} ${lastName}.trim() || "Unknown";
+const name = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Unknown";
+
 
   res.json({
     success: true,
