@@ -1,29 +1,27 @@
 import express from "express";
+import TelegramBot from "node-telegram-bot-api";
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// Home test
-app.get("/", (req, res) => {
-  res.send("Lucky77 Bot API Running");
+// 👉 Render Environment Variables မှာ ထည့်ထားရမယ့် TOKEN
+const token = process.env.BOT_TOKEN;
+
+const bot = new TelegramBot(token, { polling: true });
+
+// Group ထဲ message လာရင် reply ပြန်မယ်
+bot.on("message", (msg) => {
+  const chatId = msg.chat.id;
+
+  if (msg.text === "hello") {
+    bot.sendMessage(chatId, "Hello 👋 Welcome to Lucky77 Spin!");
+  }
 });
 
-// Simple test endpoint
-app.post("/test", (req, res) => {
-  const user = req.body;
-
-  if (!user) {
-    return res.json({ message: "No user data" });
-  }
-
-  const name = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Unknown";
-
-  res.json({
-    success: true,
-    name: name,
-  });
+app.get("/", (req, res) => {
+  res.send("Lucky77 Bot Running");
 });
 
 app.listen(PORT, () => {
