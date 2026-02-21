@@ -1,175 +1,287 @@
-// index.js (ESM) - Render + Node 22 OK
-import express from "express";
-import TelegramBot from "node-telegram-bot-api";
-import fs from "fs/promises";
-import path from "path";
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const express = require('express');
+const TelegramBot = require('node-telegram-bot-api');
 
 const app = express();
 app.use(express.json());
 
-// Render provides PORT
+// ====== ENV ======
 const PORT = process.env.PORT || 3000;
-
-// ✅ Token from Render Environment Variables
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_ID = process.env.ADMIN_ID ? String(process.env.ADMIN_ID).trim() : null;
 
-if (!BOT_TOKEN) {
-  console.error("❌ BOT_TOKEN is missing. Add BOT_TOKEN in Render Environment Variables.");
-  process.exit(1);
-}
+// ====== Storage file (persist participants) ======
+const DATA_FILE = path.join(__dirname, 'participants.json');
 
-// ---------------------------
-// Simple persistence (participants.json)
-// NOTE: .gitignore ထဲထည့်ထားတာက GitHub မတက်အောင်ပဲ—Runtime မှာ file save/load လုပ်လို့ရတယ်
-// Render free plan မှာ filesystem က restart တိုင်း reset ဖြစ်နိုင်တာတော့ သတိထား
-// ---------------------------
-const DATA_FILE = path.resolve(process.cwd(), "participants.json");
+// In-memory participants
+let participants = [];
 
-async function loadParticipants() {
+// ---------- Helpers ----------
+function safeJsonParse(text, fallback) {
   try {
-    const raw = await fs.readFile(DATA_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    // sanitize to string array
-    return parsed.map((x) => String(x)).filter(Boolean);
-  } catch (err) {
-    // file not found or invalid JSON -> start empty
-    return [];
+    return JSON.parse(text);
+  } catch (_) {
+    return fallback;
   }
 }
 
-async function saveParticipants(list) {
-  const safe = Array.from(new Set(list.map((x) => String(x).trim()).filter(Boolean)));
-  await fs.writeFile(DATA_FILE, JSON.stringify(safe, null, 2), "utf8");
-  return safe;
+function normalizeName(name) {
+  return String(name || '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-let participants = await loadParticipants();
+function uniquePush(arr, items) {
+  const set = new Set(arr.map((x) => x.toLowerCase()));
+  let addedCount = 0;
 
-// ---------------------------
-// Telegram Bot (Polling)
-// ---------------------------
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+  for (const it of items) {
+    const n = normalizeName(it);
+    if (!n) continue;
+    const key = n.toLowerCase();
+    if (!set.has(key)) {
+      arr.push(n);
+      set.add(key);
+      addedCount++;
+    }
+  }
+  return addedCount;
+}
 
 function pickRandom(list) {
-  if (!list.length) return null;
+  if (!Array.isArray(list) || list.length === 0) return null;
   const idx = Math.floor(Math.random() * list.length);
   return list[idx];
 }
 
-bot.onText(/^\/start$/, async (msg) => {
-  const chatId = msg.chat.id;
-  const text =
-    "✅ Lucky77 Wheel Bot Ready!\n\n" +
-    "Commands:\n" +
-    "/add <name>  - add participant\n" +
-    "/list        - show participants\n" +
-    "/clear       - clear all\n" +
-    "/spin        - pick random winner\n" +
-    "/count       - show count\n";
-  await bot.sendMessage(chatId, text);
+function loadParticipants() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) {
+      participants = [];
+      return;
+    }
+    const raw = fs.readFileSync(DATA_FILE, 'utf8');
+    const data = safeJsonParse(raw, []);
+    participants = Array.isArray(data) ? data.map(normalizeName).filter(Boolean) : [];
+  } catch (err) {
+    console.error('Failed to load participants.json:', err);
+    participants = [];
+  }
+}
+
+function saveParticipants() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(participants, null, 2), 'utf8');
+    return true;
+  } catch (err) {
+    console.error('Failed to save participants.json:', err);
+    return false;
+  }
+}
+
+// Load at startup
+loadParticipants();
+
+// ====== API Routes ======
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    participants: participants.length
+  });
 });
 
-bot.onText(/^\/add(?:\s+(.+))?$/i, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const name = (match?.[1] || "").trim();
+app.get('/participants', (req, res) => {
+  res.json({
+    ok: true,
+    total: participants.length,
+    participants
+  });
+});
 
+// Add participants
+app.post('/participants', (req, res) => {
+  // body: { name: "Aung" } OR { names: ["Aung","Kyaw"] }
+  const body = req.body || {};
+  const name = body.name;
+  const names = body.names;
+
+  let toAdd = [];
+
+  if (typeof name === 'string') toAdd.push(name);
+  if (Array.isArray(names)) toAdd = toAdd.concat(names);
+
+  if (toAdd.length === 0) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Send { "name": "..." } or { "names": ["a","b"] }'
+    });
+  }
+
+  const before = participants.length;
+  const added = uniquePush(participants, toAdd);
+  const saved = saveParticipants();
+
+  return res.json({
+    ok: true,
+    added,
+    before,
+    total: participants.length,
+    saved
+  });
+});
+
+// Pick random
+app.post('/pick', (req, res) => {
+  const chosen = pickRandom(participants);
+  if (!chosen) {
+    return res.status(400).json({ ok: false, error: 'No participants yet.' });
+  }
+  return res.json({ ok: true, chosen, total: participants.length });
+});
+
+// Remove one
+app.post('/remove', (req, res) => {
+  const name = normalizeName(req.body && req.body.name);
   if (!name) {
-    return bot.sendMessage(chatId, "❗ Usage: /add <name>\nExample: /add Aung Aung");
+    return res.status(400).json({ ok: false, error: 'Send { "name": "..." }' });
   }
 
-  participants.push(name);
-  participants = await saveParticipants(participants);
+  const before = participants.length;
+  participants = participants.filter((p) => p.toLowerCase() !== name.toLowerCase());
+  const removed = before - participants.length;
+  const saved = saveParticipants();
 
-  await bot.sendMessage(chatId, `✅ Added: ${name}\n👥 Total: ${participants.length}`);
+  return res.json({ ok: true, removed, total: participants.length, saved });
 });
 
-bot.onText(/^\/list$/i, async (msg) => {
-  const chatId = msg.chat.id;
-
-  if (!participants.length) {
-    return bot.sendMessage(chatId, "📭 No participants yet. Use /add <name>");
-  }
-
-  const lines = participants.map((p, i) => `${i + 1}. ${p}`).join("\n");
-  await bot.sendMessage(chatId, `👥 Participants (${participants.length}):\n${lines}`);
-});
-
-bot.onText(/^\/count$/i, async (msg) => {
-  const chatId = msg.chat.id;
-  await bot.sendMessage(chatId, `👥 Total participants: ${participants.length}`);
-});
-
-bot.onText(/^\/clear$/i, async (msg) => {
-  const chatId = msg.chat.id;
+// Clear
+app.post('/clear', (req, res) => {
   participants = [];
-  participants = await saveParticipants(participants);
-  await bot.sendMessage(chatId, "🧹 Cleared all participants.");
+  const saved = saveParticipants();
+  return res.json({ ok: true, total: participants.length, saved });
 });
 
-bot.onText(/^\/spin$/i, async (msg) => {
-  const chatId = msg.chat.id;
+// ====== Telegram Bot ======
+let bot = null;
 
-  if (!participants.length) {
-    return bot.sendMessage(chatId, "📭 No participants to spin. Use /add <name>");
-  }
+function isAdmin(chatUserId) {
+  if (!ADMIN_ID) return true; // if not set, allow everyone
+  return String(chatUserId) === String(ADMIN_ID);
+}
 
-  const winner = pickRandom(participants);
-  await bot.sendMessage(chatId, `🎉 Winner: ${winner}`);
-});
+function formatList() {
+  if (participants.length === 0) return '📭 စာရင်းမရှိသေးပါ';
+  return participants.map((p, i) => `${i + 1}. ${p}`).join('\n');
+}
 
-// Optional: log errors
-bot.on("polling_error", (err) => console.error("Polling error:", err?.message || err));
-bot.on("webhook_error", (err) => console.error("Webhook error:", err?.message || err));
+function parseCommaList(text) {
+  return String(text || '')
+    .split(',')
+    .map((x) => normalizeName(x))
+    .filter(Boolean);
+}
 
-// ---------------------------
-// Express Routes (health)
-// ---------------------------
-app.get("/", (req, res) => {
-  res.json({ ok: true, participants: participants.length });
-});
+if (!BOT_TOKEN) {
+  console.error('❌ BOT_TOKEN is missing. Set it in Render Environment Variables.');
+} else {
+  bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-app.get("/participants", (req, res) => {
-  res.json({ ok: true, participants });
-});
+  bot.onText(/^\/start$/, (msg) => {
+    bot.sendMessage(
+      msg.chat.id,
+      [
+        '✅ Lucky77 Wheel Bot Ready!',
+        '',
+        'Commands:',
+        '/add Name',
+        '/addmany Name1, Name2, Name3',
+        '/list',
+        '/pick',
+        '/remove Name',
+        '/clear (admin only if ADMIN_ID set)'
+      ].join('\n')
+    );
+  });
 
-app.
-  post("/participants", async (req, res) => {
-  // body: { name: "..." } OR { names: ["a","b"] }
-  const { name, names } = req.body || {};
+  bot.onText(/^\/list$/, (msg) => {
+    bot.sendMessage(msg.chat.id, `👥 Participants (${participants.length})\n\n${formatList()}`);
+  });
 
-  let added = [];
-  if (typeof name === "string" && name.trim()) {
-    added = [name.trim()];
-  } else if (Array.isArray(names)) {
-    added = names.map((x) => String(x).trim()).filter(Boolean);
-  }
+  bot.onText(/^\/add\s+(.+)$/i, (msg, match) => {
+    const name = normalizeName(match[1]);
+    if (!name) return bot.sendMessage(msg.chat.id, '❌ Name မမှန်ပါ');
 
-  if (!added.length) {
-    return res.status(400).json({ ok: false, error: "Send {name} or {names:[...]}" });
-  }
+    const added = uniquePush(participants, [name]);
+    saveParticipants();
 
-  participants.push(...added);
-  participants = await saveParticipants(participants);
+    if (added) {
+      bot.sendMessage(msg.chat.id, `✅ Added: ${name}\nTotal: ${participants.length}`);
+    } else {
+      bot.sendMessage(msg.chat.id, `ℹ️ Already exists: ${name}\nTotal: ${participants.length}`);
+    }
+  });
 
-  res.json({ ok: true, added, total: participants.length });
-});
+  bot.onText(/^\/addmany\s+(.+)$/i, (msg, match) => {
+    const list = parseCommaList(match[1]);
+    if (list.length === 0) return bot.sendMessage(msg.chat.id, '❌ Name list မမှန်ပါ (comma ဖြင့်ခွဲရေး)');
 
-app.post("/clear", async (req, res) => {
-  participants = [];
-  participants = await saveParticipants(participants);
-  res.json({ ok: true, total: participants.length });
-});
+    const added = uniquePush(participants, list);
+    saveParticipants();
 
+    bot.sendMessage(
+      msg.chat.id,
+      ✅ Added ${added} people\nTotal: ${participants.length}
+    );
+  });
+
+  bot.onText(/^\/pick$/i, (msg) => {
+    const chosen = pickRandom(participants);
+    if (!chosen) return bot.sendMessage(msg.chat.id, '📭 စာရင်းမရှိသေးပါ။ /add နဲ့ထည့်ပါ');
+
+    bot.sendMessage(msg.chat.id, `🎉 Winner: ${chosen}\nTotal: ${participants.length}`);
+  });
+
+  bot.onText(/^\/remove\s+(.+)$/i, (msg, match) => {
+    const name = normalizeName(match[1]);
+    if (!name) return bot.sendMessage(msg.chat.id, '❌ Name မမှန်ပါ');
+
+    const before = participants.length;
+    participants = participants.filter((p) => p.toLowerCase() !== name.toLowerCase());
+    const removed = before - participants.length;
+    saveParticipants();
+
+    if (removed) bot.sendMessage(msg.chat.id, `✅ Removed: ${name}\nTotal: ${participants.length}`);
+    else bot.sendMessage(msg.chat.id, `ℹ️ Not found: ${name}\nTotal: ${participants.length}`);
+  });
+
+  bot.onText(/^\/clear$/i, (msg) => {
+    if (!isAdmin(msg.from.id)) {
+      return bot.sendMessage(msg.chat.id, '⛔ Admin only (set ADMIN_ID in Render ENV).');
+    }
+    participants = [];
+    saveParticipants();
+    bot.sendMessage(msg.chat.id, '🧹 Cleared all participants.');
+  });
+
+  bot.on('polling_error', (err) => {
+    console.error('Telegram polling error:', err && err.message ? err.message : err);
+  });
+
+  console.log('✅ Telegram bot polling started');
+}
+
+// ====== Start server ======
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
 
-// Graceful shutdown (Render restarts)
-process.on("SIGTERM", async () => {
-  console.log("SIGTERM received. Shutting down...");
+// ====== Graceful shutdown (Render restarts) ======
+process.on('SIGTERM', () => {
   try {
-    await saveParticipants(participants);
-  } catch {}
+    saveParticipants();
+  } catch (_) {}
   process.exit(0);
 });
