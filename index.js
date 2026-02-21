@@ -38,8 +38,12 @@ bot.onText(/\/list/, (msg) => {
     bot.sendMessage(msg.chat.id, "List empty");
     return;
   }
-  bot.sendMessage(msg.chat.id, participants.map((n, i) => `${i + 1}. ${n}`).join("\n"));
-});
+bot.sendMessage(
+  msg.chat.id,
+  participants.map(function(n, i) {
+    return (i + 1) + ". " + n;
+  }).join("\n")
+);
 
 bot.onText(/\/clear/, (msg) => {
   participants = [];
@@ -57,7 +61,10 @@ bot.onText(/\/spin/, (msg) => {
 
 // Health endpoint for Render
 app.get("/", (req, res) => {
-  res.json({ ok: true, participants: participants.length });
+  res.json({
+    ok: true,
+    participants: participants.length
+  });
 });
 
 app.listen(PORT, () => {
