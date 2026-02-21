@@ -30,7 +30,10 @@ bot.onText(/\/add (.+)/, (msg, match) => {
     return;
   }
   participants.push(name);
-  bot.sendMessage(msg.chat.id, "Added: " + name + "\nTotal: " + participants.length);
+  bot.sendMessage(
+    msg.chat.id,
+    "Added: " + name + "\nTotal: " + participants.length
+  );
 });
 
 bot.onText(/\/list/, (msg) => {
@@ -38,12 +41,16 @@ bot.onText(/\/list/, (msg) => {
     bot.sendMessage(msg.chat.id, "List empty");
     return;
   }
-bot.sendMessage(
-  msg.chat.id,
-  participants.map(function(n, i) {
-    return (i + 1) + ". " + n;
-  }).join("\n")
-);
+
+  bot.sendMessage(
+    msg.chat.id,
+    participants
+      .map(function (n, i) {
+        return (i + 1) + ". " + n;
+      })
+      .join("\n")
+  );
+}); // ✅ ဒီ `});` မရှိလို့ နင့် code ပျက်နေတာ
 
 bot.onText(/\/clear/, (msg) => {
   participants = [];
@@ -63,7 +70,7 @@ bot.onText(/\/spin/, (msg) => {
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    participants: participants.length
+    participants: participants.length,
   });
 });
 
