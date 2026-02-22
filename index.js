@@ -15,10 +15,6 @@ const ADMIN_ID = process.env.ADMIN_ID ? String(process.env.ADMIN_ID) : null;
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
-// If you set PUBLIC_URL on Render => webhook mode
-// Example: https://lucky77-wheel-bot.onrender.com   (NO trailing slash)
-const PUBLIC_URL = process.env.PUBLIC_URL ? String(process.env.PUBLIC_URL).trim() : "";
-
 if (!BOT_TOKEN) {
   console.error("BOT_TOKEN missing");
   process.exit(1);
@@ -28,297 +24,263 @@ if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) {
   process.exit(1);
 }
 
+// Redis
 const redis = new Redis({
   url: UPSTASH_REDIS_REST_URL,
   token: UPSTASH_REDIS_REST_TOKEN,
 });
 
 // Keys
-const KEY_MASTER = "lucky77:master_members"; // all members ever joined / added
-const KEY_POOL = "lucky77:pool_members";     // current pool members
-const KEY_WIN_HISTORY = "lucky77:winner_history"; // optional history list
+const KEY_MEMBERS = "lucky77:members"; // all members ever registered (objects)
+const KEY_POOL = "lucky77:pool";       // current active pool (memberIds)
 
 // ---------- Helpers ----------
-function safeJsonParse(s) {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
-}
-
-async function getList(key) {
+async function getValue(key, fallback) {
   const v = await redis.get(key);
-  if (!v) return [];
-  if (Array.isArray(v)) return v;
-  if (typeof v === "string") {
-    const parsed = safeJsonParse(v);
-    return Array.isArray(parsed) ? parsed : [];
-  }
-  // if it's an object or something unexpected
-  return [];
+  if (v === null || v === undefined) return fallback;
+  return v;
 }
-
-async function setList(key, list) {
-  await redis.set(key, list);
-}
-
-function normalizeMember(tgUser) {
-  const id = tgUser?.id ? String(tgUser.id) : "";
-  const username = tgUser?.username ? String(tgUser.username) : "";
-  const fullName = [tgUser?.first_name, tgUser?.last_name].filter(Boolean).join(" ").trim();
-
-  // Display priority: Full Name > @username > id
-  const display =
-    fullName || (username ? `@${username}` : "") || (id ? `id:${id}` : "unknown");
-
-  return { id, username, fullName, display };
-}
-
-function memberKey(m) {
-  // unique key for de-dup
-  return String(m?.id || m?.username || m?.display || "").trim();
-}
-
-function uniqPushMember(list, memberObj) {
-  const k = memberKey(memberObj);
-  if (!k) return list;
-
-  const exists = list.some((x) => memberKey(x) === k);
-  if (!exists) list.push(memberObj);
-  return list;
+async function setValue(key, value) {
+  await redis.set(key, value);
 }
 
 function isAdmin(msg) {
-  if (!ADMIN_ID) return true; // if not set, allow
+  if (!ADMIN_ID) return true;
   return String(msg.from?.id) === String(ADMIN_ID);
 }
 
-function pickRandom(list) {
-  if (!list || list.length === 0) return { item: null, index: -1 };
-  const index = Math.floor(Math.random() * list.length);
-  return { item: list[index], index };
+// build full name
+function buildFullName(u) {
+  return [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
 }
 
-// ---------- Telegram Bot ----------
-let bot;
+// rule: name > username > id
+function makeDisplay(u) {
+  const fullName = buildFullName(u);
+  if (fullName) return fullName;
+  if (u.username) return `@${u.username}`;
+  return String(u.id);
+}
 
-// Webhook route (Telegram will POST updates here)
-app.post("/telegram", async (req, res) => {
-  try {
-    if (bot) bot.processUpdate(req.body);
-    return res.sendStatus(200);
-  } catch (e) {
-    console.error("processUpdate error:", e);
-    return res.sendStatus(200);
+function normalizeMemberFromUser(u) {
+  const fullName = buildFullName(u);
+  const username = u.username ? String(u.username) : null;
+  const id = String(u.id);
+
+  return {
+    id,
+    username,               // without @
+    fullName: fullName || null,
+    display: fullName || (username ? `@${username}` : id),
+    joinedAt: Date.now(),
+  };
+}
+
+function uniqMemberUpsert(list, memberObj) {
+  const idx = list.findIndex((m) => String(m.id) === String(memberObj.id));
+  if (idx === -1) {
+    list.push(memberObj);
+  } else {
+    // update display if new info available (e.g., later got username/fullName)
+    const old = list[idx];
+    const merged = {
+      ...old,
+      ...memberObj,
+      joinedAt: old.joinedAt || memberObj.joinedAt,
+    };
+    // keep best display
+    merged.display = makeBestDisplay(merged);
+    list[idx] = merged;
   }
+  return list;
+}
+
+function makeBestDisplay(m) {
+  const fullName = (m.fullName || "").trim();
+  if (fullName) return fullName;
+  const uname = (m.username || "").trim();
+  if (uname) return `@${uname}`;
+  return String(m.id);
+}
+
+async function getMembers() {
+  const v = await getValue(KEY_MEMBERS, []);
+  return Array.isArray(v) ? v : (typeof v === "string" ? JSON.parse(v) : v);
+}
+
+async function saveMembers(members) {
+  await setValue(KEY_MEMBERS, members);
+}
+
+async function getPoolIds() {
+  const v = await getValue(KEY_POOL, []);
+  return Array.isArray(v) ? v : (typeof v === "string" ? JSON.parse(v) : v);
+}
+
+async function savePoolIds(ids) {
+  await setValue(KEY_POOL, ids);
+}
+
+function uniqPushId(list, id) {
+  const s = String(id);
+  if (!list.includes(s)) list.push(s);
+  return list;
+}
+
+// ---------- Telegram ----------
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+// /start
+bot.onText(/\/start/, async (msg) => {
+  bot.sendMessage(msg.chat.id, "Bot is running ✅");
 });
 
-async function initBot() {
-  const useWebhook = !!PUBLIC_URL;
+// ✅ Auto register new joiners
+bot.on("new_chat_members", async (msg) => {
+  try {
+    const arr = msg.new_chat_members || [];
+    if (!arr.length) return;
 
-  if (useWebhook) {
-    bot = new TelegramBot(BOT_TOKEN, { webHook: true });
+    let members = await getMembers();
+    let poolIds = await getPoolIds();
 
-    const webhookUrl = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
-    await bot.setWebHook(webhookUrl);
-
-    console.log("Webhook set to:", webhookUrl);
-  } else {
-    // Local dev mode
-    bot = new TelegramBot(BOT_TOKEN, { polling: true });
-    console.log("Polling mode enabled (PUBLIC_URL not set)");
-  }
-
-  // /start
-  bot.onText(/\/start/, async (msg) => {
-    bot.sendMessage(msg.chat.id, "Bot is running ✅");
-  });
-
-  // Group join => auto add to master + pool
-  bot.on("new_chat_members", async (msg) => {
-    try {
-      const members = msg.new_chat_members || [];
-      let master = await getList(KEY_MASTER);
-      let pool = await getList(KEY_POOL);
-
-      for (const m of members) {
-        const memberObj = normalizeMember(m);
-        uniqPushMember(master, memberObj);
-        uniqPushMember(pool, memberObj);
-      }
-
-      await setList(KEY_MASTER, master);
-      await setList(KEY_POOL, pool);
-    } catch (e) {
-      console.error("new_chat_members error:", e);
+    for (const u of arr) {
+      const m = normalizeMemberFromUser(u);
+      uniqMemberUpsert(members, m);
+      uniqPushId(poolIds, m.id);
     }
-  });
 
-  // /add Name (manual add - creates "fake member" object)
-  bot.onText(/\/add (.+)/, async (msg, match) => {
-    const name = String(match[1] || "").trim();
-    if (!name) return bot.sendMessage(msg.chat.id, "Usage: /add name");
-
-    const master = await getList(KEY_MASTER);
-    const pool = await getList(KEY_POOL);
-
-    // if user manually adds, we store as display-only (no id)
-    const memberObj = { id: "", username: "", fullName: name, display: name };
-
-    uniqPushMember(master, memberObj);
-    uniqPushMember(pool, memberObj);
-
-    await setList(KEY_MASTER, master);
-    await setList(KEY_POOL, pool);
-
-    bot.sendMessage(msg.chat.id, `Added: ${name}\nTotal pool: ${pool.length}`);
-  });
-
-  // /addmany A,B,C
-  bot.onText(/\/addmany (.+)/, async (msg, match) => {
-    const raw = String(match[1] || "").trim();
-    if (!raw) return bot.sendMessage(msg.chat.id, "Usage: /addmany Name1, Name2, Name3");
-
-    const names = raw.split(",").map((x) => x.trim()).filter(Boolean);
-
-    const master = await getList(KEY_MASTER);
-    const pool = await getList(KEY_POOL);
-
-    names.forEach((n) => {
-      const memberObj = { id: "", username: "", fullName: n, display: n };
-      uniqPushMember(master, memberObj);
-      uniqPushMember(pool, memberObj);
-    });
-
-    await setList(KEY_MASTER, master);
-    await setList(KEY_POOL, pool);
-
-    bot.sendMessage(msg.chat.id, `Added ${names.length} people.\nTotal pool: ${pool.length}`);
-  });
-
-  // /list (pool)
-  bot.onText(/\/list/, async (msg) => {
-    const pool = await getList(KEY_POOL);
-    if (pool.length === 0) return bot.sendMessage(msg.chat.id, "List empty");
+    await saveMembers(members);
+    await savePoolIds(poolIds);
 
     bot.sendMessage(
       msg.chat.id,
-      pool.map((m, i) => `${i + 1}. ${m.display || "unknown"}`).join("\n")
+      `✅ Added ${arr.length} member(s)\nPool: ${poolIds.length}`
     );
-  });
-
-  // /pick (pick random member and remove from pool only)
-  bot.onText(/\/pick/, async (msg) => {
-    const pool = await getList(KEY_POOL);
-    if (pool.length === 0) return bot.sendMessage(msg.chat.id, "List empty");
-
-    const { item: winner, index } = pickRandom(pool);
-    pool.splice(index, 1);
-    await setList(KEY_POOL, pool);
-
-    bot.sendMessage(msg.chat.id, `🎉 Winner: ${winner.display}\nRemaining: ${pool.length}`);
-  });
-
-  // /remove Name (remove by display match)
-  bot.onText(/\/remove (.+)/, async (msg, match) => {
-    const name = String(match[1] || "").trim();
-    if (!name) return bot.sendMessage(msg.chat.id, "Usage: /remove name");
-
-    const pool = await getList(KEY_POOL);
-    const before = pool.length;
-
-    const afterList = pool.filter((m) => (m.display || "") !== name);
-    await setList(KEY_POOL, afterList);
-
-    bot.sendMessage(msg.chat.id, `Removed: ${name}\n${before} -> ${afterList.length}`);
-  });
-
-  // /clear (admin) => clear pool + master + history
-  bot.onText(/\/clear/, async (msg) => {
-    if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, "Admin only ❌");
-
-    await setList(KEY_MASTER, []);
-    await setList(KEY_POOL, []);
-    await setList(KEY_WIN_HISTORY, []);
-    bot.sendMessage(msg.chat.id, "Cleared ✅");
-  });
-
-  // /restart (admin) => pool = master
-  bot.onText(/\/restart/, async (msg) => {
-    if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, "Admin only ❌");
-
-    const master = await getList(KEY_MASTER);
-    await setList(KEY_POOL, master);
-    bot.sendMessage(msg.chat.id, `Restarted ✅\nPool reset to master (${master.length})`);
-  });
-}
-
-// ---------- API (CodePen fetch) ----------
-app.get("/", async (req, res) => {
-  const pool = await getList(KEY_POOL);
-  res.json({ ok: true, poolCount: pool.length });
-});
-
-// Current member pool
-app.get("/pool", async (req, res) => {
-  const pool = await getList(KEY_POOL);
-  res.json({ ok: true, pool });
-});
-
-// Pick random member (option remove=true to remove from pool)
-app.post("/member/pick", async (req, res) => {
-  const { remove } = req.body || {};
-  const pool = await getList(KEY_POOL);
-  if (pool.length === 0) return res.status(400).json({ ok: false, error: "Pool empty" });
-
-  const { item: winner, index } = pickRandom(pool);
-
-  if (remove) {
-    pool.splice(index, 1);
-    await setList(KEY_POOL, pool);
-  }
-
-  res.json({ ok: true, winner, remaining: pool.length });
-});
-
-// Restart pool from master
-app.post("/restart", async (req, res) => {
-  const master = await getList(KEY_MASTER);
-  await setList(KEY_POOL, master);
-  res.json({ ok: true, poolCount: master.length });
-});
-
-// Winner history (optional)
-app.get("/history", async (req, res) => {
-  const h = await getList(KEY_WIN_HISTORY);
-  res.json({ ok: true, history: h });
-});
-
-// Save a winner history record (CodePen can call this after prize+winner)
-app.post("/history", async (req, res) => {
-  const { prize, winner } = req.body || {};
-  const h = await getList(KEY_WIN_HISTORY);
-  h.unshift({
-    ts: Date.now(),
-    prize: String(prize || "").trim(),
-    winner: winner || null,
-  });
-  await setList(KEY_WIN_HISTORY, h.slice(0, 200));
-  res.json({ ok: true });
-});
-
-// Start server
-app.listen(PORT, async () => {
-  console.log("Server running on port " + PORT);
-  try {
-    await initBot();
   } catch (e) {
-    console.error("initBot error:", e);
+    console.error("new_chat_members error:", e);
   }
 });
 
-// Render graceful shutdown
+// ✅ Optional: existing member can self-register by typing /me
+bot.onText(/\/me|\/register/, async (msg) => {
+  try {
+    const u = msg.from;
+    const m = normalizeMemberFromUser(u);
+
+    let members = await getMembers();
+    let poolIds = await getPoolIds();
+
+    uniqMemberUpsert(members, m);
+    uniqPushId(poolIds, m.id);
+
+    await saveMembers(members);
+    await savePoolIds(poolIds);
+
+    bot.sendMessage(msg.chat.id, `Registered ✅\n${makeBestDisplay(m)}\nPool: ${poolIds.length}`);
+  } catch (e) {
+    console.error("/me error:", e);
+    bot.sendMessage(msg.chat.id, "Register error ❌");
+  }
+});
+
+// /list (show pool displays)
+bot.onText(/\/list/, async (msg) => {
+  const members = await getMembers();
+  const poolIds = await getPoolIds();
+  if (!poolIds.length) return bot.sendMessage(msg.chat.id, "Pool empty");
+
+  const lines = poolIds.map((id, i) => {
+    const m = members.find((x) => String(x.id) === String(id));
+    return `${i + 1}. ${m ? makeBestDisplay(m) : id}`;
+  });
+
+  bot.sendMessage(msg.chat.id, lines.join("\n"));
+});
+
+// /restart => bring everyone back to pool (admin)
+bot.onText(/\/restart/, async (msg) => {
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, "Admin only ❌");
+  const members = await getMembers();
+  const ids = members.map((m) => String(m.id));
+  await savePoolIds(ids);
+  bot.sendMessage(msg.chat.id, `Restarted ✅\nPool reset: ${ids.length}`);
+});
+
+// /clear => clear all (admin)
+bot.onText(/\/clear/, async (msg) => {
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, "Admin only ❌");
+  await saveMembers([]);
+  await savePoolIds([]);
+  bot.sendMessage(msg.chat.id, "Cleared ✅");
+});
+
+// ---------- API for CodePen ----------
+app.get("/", async (req, res) => {
+  const poolIds = await getPoolIds();
+  res.json({ ok: true, pool: poolIds.length });
+});
+
+// ✅ Members list (for Settings UI)
+app.get("/members", async (req, res) => {
+  const members = await getMembers();
+  // return sorted by joinedAt asc
+  members.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+  res.json({ ok: true, count: members.length, members: members.map((m) => ({
+    id: String(m.id),
+    username: m.username ? `@${m.username}` : null,
+    fullName: m.fullName || null,
+    display: makeBestDisplay(m),
+    joinedAt: m.joinedAt || null
+  }))});
+});
+
+// ✅ Pool (resolved objects)
+app.get("/pool", async (req, res) => {
+  const members = await getMembers();
+  const poolIds = await getPoolIds();
+
+  const pool = poolIds.map((id) => {
+    const m = members.find((x) => String(x.id) === String(id));
+    return m
+      ? { id: String(m.id), display: makeBestDisplay(m), username: m.username ? `@${m.username}` : null, fullName: m.fullName || null }
+      : { id: String(id), display: String(id), username: null, fullName: null };
+  });
+
+  res.json({ ok: true, poolCount: pool.length, pool });
+});
+
+// ✅ Winner (pick random memberId from pool)
+app.post("/winner", async (req, res) => {
+  const members = await getMembers();
+  const poolIds = await getPoolIds();
+  if (!poolIds.length) return res.status(400).json({ ok: false, error: "Pool empty" });
+
+  const idx = Math.floor(Math.random() * poolIds.length);
+  const winnerId = poolIds[idx];
+
+  poolIds.splice(idx, 1);
+  await savePoolIds(poolIds);
+
+  const m = members.find((x) => String(x.id) === String(winnerId));
+  const winner = m
+    ? { id: String(m.id), display: makeBestDisplay(m), username: m.username ? `@${m.username}` : null, fullName: m.fullName || null }
+    : { id: String(winnerId), display: String(winnerId), username: null, fullName: null };
+
+  res.json({ ok: true, winner, remaining: poolIds.length });
+});
+
+// ✅ Restart pool from all members
+app.post("/restart", async (req, res) => {
+  const members = await getMembers();
+  const ids = members.map((m) => String(m.id));
+  await savePoolIds(ids);
+  res.json({ ok: true, poolCount: ids.length });
+});
+
+// Start
+app.listen(PORT, () => console.log("Server running on port " + PORT));
+
 process.on("SIGTERM", async () => {
   try {
     console.log("SIGTERM received. Shutting down...");
