@@ -24,23 +24,31 @@ if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) {
   process.exit(1);
 }
 
-// Redis
 const redis = new Redis({
   url: UPSTASH_REDIS_REST_URL,
   token: UPSTASH_REDIS_REST_TOKEN,
 });
 
-// Keys
-const KEY_MEMBERS = "lucky77:members"; // all members ever registered (objects)
-const KEY_POOL = "lucky77:pool";       // current active pool (memberIds)
+// ===== Redis Keys =====
+const KEY_MEMBERS = "lucky77:members"; // array of member objects
+const KEY_WINNERS = "lucky77:winners"; // array of winner records
+const KEY_PRIZE_POOL = "lucky77:prize_pool"; // array of prize labels (expanded by count)
+const KEY_PRIZE_PLAN = "lucky77:prize_plan"; // [{label,count}] stored for restart
 
-// ---------- Helpers ----------
-async function getValue(key, fallback) {
+// ===== Helpers =====
+async function getJSON(key, fallback) {
   const v = await redis.get(key);
-  if (v === null || v === undefined) return fallback;
+  if (!v) return fallback;
+  if (typeof v === "string") {
+    try {
+      return JSON.parse(v);
+    } catch (e) {
+      return fallback;
+    }
+  }
   return v;
 }
-async function setValue(key, value) {
+async function setJSON(key, value) {
   await redis.set(key, value);
 }
 
@@ -49,238 +57,201 @@ function isAdmin(msg) {
   return String(msg.from?.id) === String(ADMIN_ID);
 }
 
-// build full name
-function buildFullName(u) {
-  return [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+function displayNameOf(member) {
+  const full = [member.first_name, member.last_name].filter(Boolean).join(" ").trim();
+  if (full) return full;
+  if (member.username) return `@${member.username}`;
+  return String(member.id);
 }
 
-// rule: name > username > id
-function makeDisplay(u) {
-  const fullName = buildFullName(u);
-  if (fullName) return fullName;
-  if (u.username) return `@${u.username}`;
-  return String(u.id);
-}
-
-function normalizeMemberFromUser(u) {
-  const fullName = buildFullName(u);
-  const username = u.username ? String(u.username) : null;
-  const id = String(u.id);
-
+function normalizeMember(tgUser) {
   return {
-    id,
-    username,               // without @
-    fullName: fullName || null,
-    display: fullName || (username ? `@${username}` : id),
-    joinedAt: Date.now(),
+    id: String(tgUser.id),
+    username: tgUser.username ? String(tgUser.username) : "",
+    first_name: tgUser.first_name ? String(tgUser.first_name) : "",
+    last_name: tgUser.last_name ? String(tgUser.last_name) : "",
+    display: displayNameOf(tgUser),
+    updatedAt: Date.now(),
   };
 }
 
-function uniqMemberUpsert(list, memberObj) {
-  const idx = list.findIndex((m) => String(m.id) === String(memberObj.id));
-  if (idx === -1) {
-    list.push(memberObj);
-  } else {
-    // update display if new info available (e.g., later got username/fullName)
-    const old = list[idx];
-    const merged = {
-      ...old,
-      ...memberObj,
-      joinedAt: old.joinedAt || memberObj.joinedAt,
-    };
-    // keep best display
-    merged.display = makeBestDisplay(merged);
-    list[idx] = merged;
+function upsertMember(list, tgUser) {
+  const m = normalizeMember(tgUser);
+  const idx = list.findIndex((x) => String(x.id) === String(m.id));
+  if (idx >= 0) list[idx] = { ...list[idx], ...m };
+  else list.push(m);
+  return list;
+}
+
+// Prize pool build: [{label,count}] => ["10000Ks","10000Ks",...]
+function buildPrizePool(prizePlan) {
+  const pool = [];
+  for (const p of prizePlan) {
+    const label = String(p.label || "").trim();
+    const count = Number(p.count || 0);
+    if (!label || !Number.isFinite(count) || count <= 0) continue;
+    for (let i = 0; i < count; i++) pool.push(label);
   }
-  return list;
+  return pool;
 }
 
-function makeBestDisplay(m) {
-  const fullName = (m.fullName || "").trim();
-  if (fullName) return fullName;
-  const uname = (m.username || "").trim();
-  if (uname) return `@${uname}`;
-  return String(m.id);
+// pop random item from array
+function popRandom(arr) {
+  if (!arr.length) return null;
+  const idx = Math.floor(Math.random() * arr.length);
+  const v = arr[idx];
+  arr.splice(idx, 1);
+  return v;
 }
 
-async function getMembers() {
-  const v = await getValue(KEY_MEMBERS, []);
-  return Array.isArray(v) ? v : (typeof v === "string" ? JSON.parse(v) : v);
-}
-
-async function saveMembers(members) {
-  await setValue(KEY_MEMBERS, members);
-}
-
-async function getPoolIds() {
-  const v = await getValue(KEY_POOL, []);
-  return Array.isArray(v) ? v : (typeof v === "string" ? JSON.parse(v) : v);
-}
-
-async function savePoolIds(ids) {
-  await setValue(KEY_POOL, ids);
-}
-
-function uniqPushId(list, id) {
-  const s = String(id);
-  if (!list.includes(s)) list.push(s);
-  return list;
-}
-
-// ---------- Telegram ----------
+// ===== Telegram Bot =====
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // /start
 bot.onText(/\/start/, async (msg) => {
-  bot.sendMessage(msg.chat.id, "Bot is running ✅");
+  try {
+    // also capture whoever sent message
+    let members = await getJSON(KEY_MEMBERS, []);
+    members = upsertMember(members, msg.from);
+    await setJSON(KEY_MEMBERS, members);
+
+    bot.sendMessage(msg.chat.id, "Bot is running ✅");
+  } catch (e) {
+    console.error("start error:", e);
+  }
 });
 
-// ✅ Auto register new joiners
+// new members join => store
 bot.on("new_chat_members", async (msg) => {
   try {
-    const arr = msg.new_chat_members || [];
-    if (!arr.length) return;
-
-    let members = await getMembers();
-    let poolIds = await getPoolIds();
-
-    for (const u of arr) {
-      const m = normalizeMemberFromUser(u);
-      uniqMemberUpsert(members, m);
-      uniqPushId(poolIds, m.id);
+    let members = await getJSON(KEY_MEMBERS, []);
+    for (const u of msg.new_chat_members || []) {
+      members = upsertMember(members, u);
     }
-
-    await saveMembers(members);
-    await savePoolIds(poolIds);
-
-    bot.sendMessage(
-      msg.chat.id,
-      `✅ Added ${arr.length} member(s)\nPool: ${poolIds.length}`
-    );
+    await setJSON(KEY_MEMBERS, members);
   } catch (e) {
     console.error("new_chat_members error:", e);
   }
 });
 
-// ✅ Optional: existing member can self-register by typing /me
-bot.onText(/\/me|\/register/, async (msg) => {
+// also store any message sender (helps capture existing members who talk)
+bot.on("message", async (msg) => {
   try {
-    const u = msg.from;
-    const m = normalizeMemberFromUser(u);
-
-    let members = await getMembers();
-    let poolIds = await getPoolIds();
-
-    uniqMemberUpsert(members, m);
-    uniqPushId(poolIds, m.id);
-
-    await saveMembers(members);
-    await savePoolIds(poolIds);
-
-    bot.sendMessage(msg.chat.id, `Registered ✅\n${makeBestDisplay(m)}\nPool: ${poolIds.length}`);
-  } catch (e) {
-    console.error("/me error:", e);
-    bot.sendMessage(msg.chat.id, "Register error ❌");
-  }
+    if (!msg.from) return;
+    let members = await getJSON(KEY_MEMBERS, []);
+    members = upsertMember(members, msg.from);
+    await setJSON(KEY_MEMBERS, members);
+  } catch (e) {}
 });
 
-// /list (show pool displays)
-bot.onText(/\/list/, async (msg) => {
-  const members = await getMembers();
-  const poolIds = await getPoolIds();
-  if (!poolIds.length) return bot.sendMessage(msg.chat.id, "Pool empty");
+// ===== API =====
 
-  const lines = poolIds.map((id, i) => {
-    const m = members.find((x) => String(x.id) === String(id));
-    return `${i + 1}. ${m ? makeBestDisplay(m) : id}`;
-  });
-
-  bot.sendMessage(msg.chat.id, lines.join("\n"));
-});
-
-// /restart => bring everyone back to pool (admin)
-bot.onText(/\/restart/, async (msg) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, "Admin only ❌");
-  const members = await getMembers();
-  const ids = members.map((m) => String(m.id));
-  await savePoolIds(ids);
-  bot.sendMessage(msg.chat.id, `Restarted ✅\nPool reset: ${ids.length}`);
-});
-
-// /clear => clear all (admin)
-bot.onText(/\/clear/, async (msg) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, "Admin only ❌");
-  await saveMembers([]);
-  await savePoolIds([]);
-  bot.sendMessage(msg.chat.id, "Cleared ✅");
-});
-
-// ---------- API for CodePen ----------
+// health
 app.get("/", async (req, res) => {
-  const poolIds = await getPoolIds();
-  res.json({ ok: true, pool: poolIds.length });
-});
-
-// ✅ Members list (for Settings UI)
-app.get("/members", async (req, res) => {
-  const members = await getMembers();
-  // return sorted by joinedAt asc
-  members.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
-  res.json({ ok: true, count: members.length, members: members.map((m) => ({
-    id: String(m.id),
-    username: m.username ? `@${m.username}` : null,
-    fullName: m.fullName || null,
-    display: makeBestDisplay(m),
-    joinedAt: m.joinedAt || null
-  }))});
-});
-
-// ✅ Pool (resolved objects)
-app.get("/pool", async (req, res) => {
-  const members = await getMembers();
-  const poolIds = await getPoolIds();
-
-  const pool = poolIds.map((id) => {
-    const m = members.find((x) => String(x.id) === String(id));
-    return m
-      ? { id: String(m.id), display: makeBestDisplay(m), username: m.username ? `@${m.username}` : null, fullName: m.fullName || null }
-      : { id: String(id), display: String(id), username: null, fullName: null };
+  const members = await getJSON(KEY_MEMBERS, []);
+  const prizePool = await getJSON(KEY_PRIZE_POOL, []);
+  const winners = await getJSON(KEY_WINNERS, []);
+  res.json({
+    ok: true,
+    members: members.length,
+    prizesLeft: prizePool.length,
+    winners: winners.length,
   });
-
-  res.json({ ok: true, poolCount: pool.length, pool });
 });
 
-// ✅ Winner (pick random memberId from pool)
-app.post("/winner", async (req, res) => {
-  const members = await getMembers();
-  const poolIds = await getPoolIds();
-  if (!poolIds.length) return res.status(400).json({ ok: false, error: "Pool empty" });
-
-  const idx = Math.floor(Math.random() * poolIds.length);
-  const winnerId = poolIds[idx];
-
-  poolIds.splice(idx, 1);
-  await savePoolIds(poolIds);
-
-  const m = members.find((x) => String(x.id) === String(winnerId));
-  const winner = m
-    ? { id: String(m.id), display: makeBestDisplay(m), username: m.username ? `@${m.username}` : null, fullName: m.fullName || null }
-    : { id: String(winnerId), display: String(winnerId), username: null, fullName: null };
-
-  res.json({ ok: true, winner, remaining: poolIds.length });
+// GET members
+app.get("/members", async (req, res) => {
+  const members = await getJSON(KEY_MEMBERS, []);
+  // sort by updatedAt desc
+  members.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  res.json({ ok: true, members });
 });
 
-// ✅ Restart pool from all members
+// GET winners history
+app.get("/winners", async (req, res) => {
+  const winners = await getJSON(KEY_WINNERS, []);
+  res.json({ ok: true, winners });
+});
+
+// POST set prize plan (admin optional)
+app.post("/prizes", async (req, res) => {
+  const { prizes } = req.body || {};
+  if (!Array.isArray(prizes)) {
+    return res.status(400).json({ ok: false, error: "Send { prizes: [{label,count}] }" });
+  }
+  const plan = prizes
+    .map((p) => ({ label: String(p.label || "").trim(), count: Number(p.count || 0) }))
+    .filter((p) => p.label && Number.isFinite(p.count) && p.count > 0);
+
+  const pool = buildPrizePool(plan);
+  await setJSON(KEY_PRIZE_PLAN, plan);
+  await setJSON(KEY_PRIZE_POOL, pool);
+
+  res.json({ ok: true, planCount: plan.length, prizesTotal: pool.length });
+});
+
+// POST restart (reset prize pool + clear winners)
 app.post("/restart", async (req, res) => {
-  const members = await getMembers();
-  const ids = members.map((m) => String(m.id));
-  await savePoolIds(ids);
-  res.json({ ok: true, poolCount: ids.length });
+  const plan = await getJSON(KEY_PRIZE_PLAN, []);
+  const pool = buildPrizePool(plan);
+  await setJSON(KEY_PRIZE_POOL, pool);
+  await setJSON(KEY_WINNERS, []);
+  res.json({ ok: true, prizesTotal: pool.length, winnersCleared: true });
 });
 
-// Start
+// POST draw => consume 1 prize + pick 1 member not won before
+app.post("/draw", async (req, res) => {
+  const members = await getJSON(KEY_MEMBERS, []);
+  const winners = await getJSON(KEY_WINNERS, []);
+  const prizePool = await getJSON(KEY_PRIZE_POOL, []);
+
+  if (!prizePool.length) {
+    return res.status(400).json({ ok: false, error: "Prize pool empty. Set prizes or restart." });
+  }
+  if (!members.length) {
+    return res.status(400).json({ ok: false, error: "No members yet. Let people join/send msg." });
+  }
+
+  const winnerIds = new Set(winners.map((w) => String(w.member?.id)));
+  const eligible = members.filter((m) => !winnerIds.has(String(m.id)));
+
+  if (!eligible.length) {
+    return res.status(400).json({ ok: false, error: "All members already won. Restart spin." });
+  }
+
+  const prize = popRandom(prizePool);
+  const member = eligible[Math.floor(Math.random() * eligible.length)];
+
+  const record = {
+    ts: Date.now(),
+    prize,
+    member: {
+      id: String(member.id),
+      username: member.username || "",
+      first_name: member.first_name || "",
+      last_name: member.last_name || "",
+      display: member.display || displayNameOf(member),
+    },
+  };
+
+  winners.unshift(record);
+
+  await setJSON(KEY_PRIZE_POOL, prizePool);
+  await setJSON(KEY_WINNERS, winners);
+
+  res.json({
+    ok: true,
+    prize,
+    member: record.member,
+    prizesLeft: prizePool.length,
+    winnersCount: winners.length,
+  });
+});
+
+// Start server
 app.listen(PORT, () => console.log("Server running on port " + PORT));
 
+// Render graceful shutdown
 process.on("SIGTERM", async () => {
   try {
     console.log("SIGTERM received. Shutting down...");
