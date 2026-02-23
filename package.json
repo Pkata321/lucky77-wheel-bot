@@ -1,9 +1,8 @@
 {
   "name": "lucky77-wheel-bot",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Lucky77 Telegram group register + Redis member store + CodePen API",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
@@ -15,6 +14,6 @@
     "node-telegram-bot-api": "^0.66.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   }
 }
