@@ -11,8 +11,7 @@ const {
   BOT_TOKEN,
   UPSTASH_REDIS_REST_URL,
   UPSTASH_REDIS_REST_TOKEN,
-  OWNER_ID,
-  API_KEY
+  OWNER_ID
 } = process.env;
 
 function must(v, name) {
@@ -34,10 +33,9 @@ const redis = new Redis({
   token: UPSTASH_REDIS_REST_TOKEN
 });
 
-const KEY_PREFIX = "lucky77:v5";
+const KEY_PREFIX = "lucky77:v6";
 const KEY_MEMBERS = `${KEY_PREFIX}:members`;
 const KEY_MEMBER = (id) => `${KEY_PREFIX}:member:${id}`;
-const KEY_WINNERS = `${KEY_PREFIX}:winners`;
 const KEY_GROUP_ID = `${KEY_PREFIX}:group_id`;
 
 /* ================= BOT ================= */
@@ -67,8 +65,6 @@ function display(u) {
   return String(u.id);
 }
 
-/* ================= AUTO GROUP DETECT ================= */
-
 async function getGroupId() {
   return await redis.get(KEY_GROUP_ID);
 }
@@ -78,12 +74,11 @@ async function setGroupId(id) {
   console.log("Group ID Saved:", id);
 }
 
-/* ================= REGISTER FLOW ================= */
-
 async function saveMember(u) {
   const { name, username } = nameParts(u);
 
   await redis.sadd(KEY_MEMBERS, String(u.id));
+
   await redis.hset(KEY_MEMBER(u.id), {
     id: String(u.id),
     name,
@@ -93,10 +88,11 @@ async function saveMember(u) {
   });
 }
 
+/* ================= GROUP JOIN ================= */
+
 bot.on("message", async (msg) => {
   if (!msg.chat) return;
 
-  // Auto save group id first time bot sees group
   if (msg.chat.type === "group" || msg.chat.type === "supergroup") {
     const saved = await getGroupId();
     if (!saved) {
@@ -135,8 +131,40 @@ bot.on("message", async (msg) => {
 /* ================= CALLBACK ================= */
 
 bot.on("callback_query", async (cq) => {
+
   const data = cq.data || "";
+
+  // Registered ထပ်နှိပ်
+  if (data === "done") {
+    await bot.answerCallbackQuery(cq.id, {
+      text: "✅ Registered ပြီးသားပါ။",
+      show_alert: true
+    });
+    return;
+  }
+
   if (!data.startsWith("reg:")) return;
+
+  const userId = data.split(":")[1];
+
+  // သူမဟုတ်တဲ့သူနှိပ်ရင်
+  if (String(userId) !== String(cq.from.id)) {
+    await bot.answerCallbackQuery(cq.id, {
+      text: "ဒီခလုတ်က မင်းအတွက်ပဲ",
+      show_alert: true
+    });
+    return;
+  }
+
+  // Already registered စစ်
+  const already = await redis.sismember(KEY_MEMBERS, String(cq.from.id));
+  if (already) {
+    await bot.answerCallbackQuery(cq.id, {
+      text: "✅ Registered ပြီးသားပါ။",
+      show_alert: true
+    });
+    return;
+  }
 
   await saveMember(cq.from);
 
@@ -155,6 +183,7 @@ bot.on("callback_query", async (cq) => {
     }
   );
 
+  // ID-only user
   const { name, username } = nameParts(cq.from);
 
   if (!username && !name) {
@@ -162,7 +191,7 @@ bot.on("callback_query", async (cq) => {
 
     await bot.sendMessage(
       cq.message.chat.id,
-      `⚠️ DM Enable ဖို့ Start Bot ကိုနှိပ်ပါ။`,
+      `⚠️ Username မရှိပါ။\nDM Enable ဖို့ Start Bot ကိုနှိပ်ပါ။`,
       {
         reply_markup: {
           inline_keyboard: [[{ text: "▶️ Start Bot", url: startUrl }]]
@@ -175,6 +204,7 @@ bot.on("callback_query", async (cq) => {
 /* ================= PRIVATE START ================= */
 
 bot.onText(/\/start/, async (msg) => {
+
   if (msg.chat.type !== "private") return;
 
   await redis.hset(KEY_MEMBER(msg.from.id), {
