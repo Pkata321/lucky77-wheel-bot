@@ -78,7 +78,7 @@ bot.on("new_chat_members", async (msg) => {
 
     await bot.sendMessage(
       msg.chat.id,
-      🎡 Lucky77 Lucky Wheel Event\n\nRegister လုပ်ဖို့အောက်က Button ကိုနှိပ်ပါ,
+      `🎡 Lucky77 Lucky Wheel Event\n\nRegister လုပ်ဖို့အောက်က Button ကိုနှိပ်ပါ`,
       {
         reply_markup: {
           inline_keyboard: [
