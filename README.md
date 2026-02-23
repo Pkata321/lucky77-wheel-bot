@@ -1,68 +1,76 @@
 # lucky77-wheel-bot (v2)
 
-Telegram Lucky Wheel Bot + Render API + Upstash Redis  
-Flow:
-- Group: /register -> shows REGISTER button (deep link to bot)
-- User must press Start once in DM (Telegram limitation)
-- Bot saves: user_id + name + username
-- CodePen calls API to pick a random winner for a selected prize
-- Bot automatically DM winner by user_id (if user started bot already)
+Lucky77 Lucky Wheel Event Bot (Render + Upstash Redis)
+
+## Features
+- Member join group -> Bot sends Register button
+- User presses Register in group -> Popup alert + save user_id into Redis
+- Button becomes Registered ✅ and cannot register twice
+- If user doesn't press Register within 30 seconds, bot will Pin the register message (bot must have pin permission)
+- API endpoints for CodePen (later):
+  - List participants
+  - Pick winner
+  - Winners history
+  - Notify winner via DM
 
 ---
 
-## Deploy (Render)
+## Setup (Render)
 
-### 1) Create Render Web Service
-- Node service
-- Start command: `npm start`
+### 1) Deploy
+Deploy as Web Service on Render.
 
 ### 2) Environment Variables (Render)
-Required:
-- `BOT_TOKEN` = Telegram Bot token
-- `UPSTASH_REDIS_REST_URL`
-- `UPSTASH_REDIS_REST_TOKEN`
-- `PUBLIC_URL` = https://your-service.onrender.com
-- `API_KEY` = secret key used by CodePen (send via header `x-api-key`)
-- `OWNER_ID` = your Telegram numeric ID
-Optional but recommended:
-- `GROUP_ID` = your group id (example: `-100xxxxxxxxxx`)
+You must set:
 
-### 3) Upstash Redis
-- Create Redis database in Upstash
-- Copy REST URL + REST TOKEN into Render ENV
+- BOT_TOKEN = Telegram bot token
+- UPSTASH_REDIS_REST_URL
+- UPSTASH_REDIS_REST_TOKEN
+- PUBLIC_URL = https://lucky77-wheel-bot.onrender.com
+- API_KEY = Lucky77_luckywheel_77 (use this in CodePen later)
+- OWNER_ID = your telegram numeric user id
+- GROUP_ID = your supergroup id (IMPORTANT)
 
-> If you had old keys causing `WRONGTYPE`, use owner command:
-`/reset_db`
+✅ If you see message link like t.me/c/3542073765/123
+then your GROUP_ID should be:
+-1003542073765
 
----
+Optional:
+- EXCLUDE_ADMINS = true/false (default: true)
 
-## Telegram Commands (Owner-only)
-- `/exclude <id>` : exclude admin/bot/owner/etc from winning
-- `/unexclude <id>`
-- `/reset_round` : allow all winners to win again
-- `/reset_db` : clears lw2:* keys (use carefully)
-
-## Group Command
-- `/register` : posts REGISTER button
+### 3) BotFather settings
+- Disable privacy: /setprivacy -> Disable
+- Add bot to group as admin
+  - Needs permission to:
+    - Read messages (privacy disabled already)
+    - Pin messages (if you want auto pin)
 
 ---
 
-## API (for CodePen)
+## Telegram Commands
+- /id -> show Chat ID (use to confirm GROUP_ID)
 
-### Auth
-Send header:
-- `x-api-key: <API_KEY>`
+---
 
-### GET /
-Health + member count
+## API (for CodePen later)
+All API calls require API key:
+- header: x-api-key: <API_KEY>
+or query/body: api_key=<API_KEY>
 
-### GET /members
-Returns member list (id, name, username)
+### Health
+- GET /
 
-### GET /winners
-Returns winner history logs
+### Participants
+- GET /participants
 
-### POST /winner
+### Pick winner
+- POST /pick
+
+### Winners history
+- GET /winners
+
+### Notify Winner DM
+- POST /notify-winner
 Body:
 ```json
-{ "prize": "10000Ks" }
+{ "user_id": "123456789", "text": "🎉 You won!" }
