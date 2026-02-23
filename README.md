@@ -1,37 +1,48 @@
-# Lucky77 Wheel Bot
+# lucky77-wheel-bot (v2)
 
-Telegram Group Register + Winner Auto DM
+Lucky77 Lucky Wheel Telegram Bot + Render API for CodePen UI.
 
-## Setup (Render)
+## What it does
+- In Telegram Group:
+  - When a member joins, bot sends a **Register** button message.
+  - Message auto-deletes after **30 seconds**.
+  - Member clicks Register -> saved to Redis.
+  - Button becomes **✅ Registered** (cannot register again).
+- Private DM:
+  - If user has started bot before, bot can DM winner messages.
+  - If user never started bot, Telegram blocks bot from DM -> bot will show "Start Bot" link in group.
 
-Environment Variables:
+## Requirements
+- Bot must be **Admin in the group** (to receive join events reliably & delete messages).
+- Upstash Redis database (REST URL + token)
 
-BOT_TOKEN
-PUBLIC_URL
-API_KEY
-OWNER_ID
-GROUP_ID
-UPSTASH_REDIS_REST_URL
-UPSTASH_REDIS_REST_TOKEN
+## Render (Web Service) setup
 
-## Flow
+### Environment Variables
+Set these in Render -> Environment:
 
-/register → shows register button
+- `BOT_TOKEN` = Telegram bot token
+- `GROUP_ID` = Telegram group id (example: `-3542073765`)
+- `OWNER_ID` = Owner telegram user id (numeric)
+- `API_KEY` = `Lucky77_luckywheel_77` (used by CodePen to call API)
+- `PUBLIC_URL` = `https://lucky77-wheel-bot.onrender.com`
+- `UPSTASH_REDIS_REST_URL` = your Upstash REST URL (https://xxxxx.upstash.io)
+- `UPSTASH_REDIS_REST_TOKEN` = your Upstash REST token
 
-User clicks → saved + DM auto sent
+Optional:
+- `EXCLUDE_IDS` = comma separated ids to exclude from member list (admins etc), e.g. `111,222,333`
 
-Winner API:
+### Start Command
+Render start command:
+- `npm start`
 
-POST /winner
-Header: x-api-key: YOUR_API_KEY
-Body:
-{
-  "prize": "10000Ks"
-}
+## API Endpoints (for CodePen)
+All endpoints require API key via:
+- header `X-API-KEY: <API_KEY>` OR query `?key=<API_KEY>`
 
-Bot:
-- picks random member
-- excludes owner/admin/bot
-- no repeat winners
-- announces in group
-- sends DM to winner
+- `GET /health`
+- `GET /api/members`
+- `POST /api/winner`
+  Body:
+  ```json
+  { "user_id":"123", "prize":"10000Ks", "message":"custom text optional" }
