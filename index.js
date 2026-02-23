@@ -5,8 +5,6 @@ const cors = require("cors");
 const TelegramBot = require("node-telegram-bot-api");
 const { Redis } = require("@upstash/redis");
 
-/* ================= ENV ================= */
-
 const {
   BOT_TOKEN,
   UPSTASH_REDIS_REST_URL,
@@ -26,19 +24,15 @@ must(UPSTASH_REDIS_REST_URL, "UPSTASH_REDIS_REST_URL");
 must(UPSTASH_REDIS_REST_TOKEN, "UPSTASH_REDIS_REST_TOKEN");
 must(OWNER_ID, "OWNER_ID");
 
-/* ================= REDIS ================= */
-
 const redis = new Redis({
   url: UPSTASH_REDIS_REST_URL,
   token: UPSTASH_REDIS_REST_TOKEN
 });
 
-const KEY_PREFIX = "lucky77:v6";
+const KEY_PREFIX = "lucky77:v7";
 const KEY_MEMBERS = `${KEY_PREFIX}:members`;
 const KEY_MEMBER = (id) => `${KEY_PREFIX}:member:${id}`;
 const KEY_GROUP_ID = `${KEY_PREFIX}:group_id`;
-
-/* ================= BOT ================= */
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
@@ -49,8 +43,6 @@ let BOT_USERNAME = null;
   BOT_USERNAME = me.username;
   console.log("Bot Ready:", BOT_USERNAME);
 })();
-
-/* ================= HELPERS ================= */
 
 function nameParts(u) {
   const name = `${u.first_name || ""} ${u.last_name || ""}`.trim();
@@ -71,7 +63,6 @@ async function getGroupId() {
 
 async function setGroupId(id) {
   await redis.set(KEY_GROUP_ID, String(id));
-  console.log("Group ID Saved:", id);
 }
 
 async function saveMember(u) {
@@ -88,16 +79,15 @@ async function saveMember(u) {
   });
 }
 
-/* ================= GROUP JOIN ================= */
+/* ================= JOIN ================= */
 
 bot.on("message", async (msg) => {
+
   if (!msg.chat) return;
 
   if (msg.chat.type === "group" || msg.chat.type === "supergroup") {
     const saved = await getGroupId();
-    if (!saved) {
-      await setGroupId(msg.chat.id);
-    }
+    if (!saved) await setGroupId(msg.chat.id);
   }
 
   const groupId = await getGroupId();
@@ -117,13 +107,9 @@ bot.on("message", async (msg) => {
         ]
       };
 
-      const sent = await bot.sendMessage(groupId, text, {
+      await bot.sendMessage(groupId, text, {
         reply_markup: keyboard
       });
-
-      setTimeout(() => {
-        bot.deleteMessage(groupId, sent.message_id).catch(() => {});
-      }, 30000);
     }
   }
 });
@@ -134,10 +120,9 @@ bot.on("callback_query", async (cq) => {
 
   const data = cq.data || "";
 
-  // Registered ထပ်နှိပ်
   if (data === "done") {
     await bot.answerCallbackQuery(cq.id, {
-      text: "✅ Registered ပြီးသားပါ။",
+      text: "✅ Registered လုပ်ထားပြီးသားပါ။",
       show_alert: true
     });
     return;
@@ -147,7 +132,6 @@ bot.on("callback_query", async (cq) => {
 
   const userId = data.split(":")[1];
 
-  // သူမဟုတ်တဲ့သူနှိပ်ရင်
   if (String(userId) !== String(cq.from.id)) {
     await bot.answerCallbackQuery(cq.id, {
       text: "ဒီခလုတ်က မင်းအတွက်ပဲ",
@@ -156,11 +140,10 @@ bot.on("callback_query", async (cq) => {
     return;
   }
 
-  // Already registered စစ်
   const already = await redis.sismember(KEY_MEMBERS, String(cq.from.id));
   if (already) {
     await bot.answerCallbackQuery(cq.id, {
-      text: "✅ Registered ပြီးသားပါ။",
+      text: "✅ Registered လုပ်ထားပြီးသားပါ။",
       show_alert: true
     });
     return;
@@ -168,10 +151,37 @@ bot.on("callback_query", async (cq) => {
 
   await saveMember(cq.from);
 
-  await bot.answerCallbackQuery(cq.id, {
-    text: "🎉 Registered!",
-    show_alert: true
-  });
+  const { name, username } = nameParts(cq.from);
+
+  if (username || name) {
+    await bot.answerCallbackQuery(cq.id, {
+      text: `${display(cq.from)} Registered လုပ်ပြီးပါပြီနော် 🎉`,
+      show_alert: true
+    });
+  } else {
+
+    await bot.answerCallbackQuery(cq.id, {
+      text: "DM Enable လုပ်ရန်လိုပါသည်",
+      show_alert: true
+    });
+
+    const startUrl = `https://t.me/${BOT_USERNAME}?start=enable`;
+
+    const longMsg =
+`⚠️ Winner ဖြစ်ရင် ဆက်သွယ်နိုင်ဖို့ DM Service Enable လုပ်ရန်လိုပါသည်။
+
+📌 ညီမတို့ရဲ့ Lucky77 ဟာ American နိုင်ငံထောက်ခံချက်ရ ဂိမ်းဆိုဒ်ကြီးဖြစ်တာမို့ ယုံကြည်စိတ်ချစွာကစားနိုင်ပါတယ်ရှင့်။
+
+ဆုမဲကံထူးမှုကြီးကို လက်မလွှတ်ရအောင် အောက်က Start Bot ကိုနှိပ်ပါရှင့်။`;
+
+    await bot.sendMessage(cq.message.chat.id, longMsg, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "▶️ Start Bot Register", url: startUrl }]
+        ]
+      }
+    });
+  }
 
   await bot.editMessageReplyMarkup(
     {
@@ -182,23 +192,6 @@ bot.on("callback_query", async (cq) => {
       message_id: cq.message.message_id
     }
   );
-
-  // ID-only user
-  const { name, username } = nameParts(cq.from);
-
-  if (!username && !name) {
-    const startUrl = `https://t.me/${BOT_USERNAME}?start=enable`;
-
-    await bot.sendMessage(
-      cq.message.chat.id,
-      `⚠️ Username မရှိပါ။\nDM Enable ဖို့ Start Bot ကိုနှိပ်ပါ။`,
-      {
-        reply_markup: {
-          inline_keyboard: [[{ text: "▶️ Start Bot", url: startUrl }]]
-        }
-      }
-    );
-  }
 });
 
 /* ================= PRIVATE START ================= */
@@ -213,11 +206,11 @@ bot.onText(/\/start/, async (msg) => {
 
   await bot.sendMessage(
     msg.chat.id,
-    "✅ DM Enable ပြီးပါပြီ။ Prize ပေါက်ရင် ဒီနေရာကို message လာပါမယ်။"
+    "🎉 Lucky77 Register အောင်မြင်ပါပြီ။\n\n📩 Prize ပေါက်ရင် ဒီနေရာကနေ ဆက်သွယ်ပေးပါမယ်။"
   );
 });
 
-/* ================= EXPRESS ================= */
+/* ================= SERVER ================= */
 
 const app = express();
 app.use(cors());
