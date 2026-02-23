@@ -11,11 +11,8 @@ const {
   BOT_TOKEN,
   UPSTASH_REDIS_REST_URL,
   UPSTASH_REDIS_REST_TOKEN,
-  GROUP_ID,
   OWNER_ID,
-  API_KEY,
-  PUBLIC_URL,
-  EXCLUDE_IDS
+  API_KEY
 } = process.env;
 
 function must(v, name) {
@@ -28,7 +25,6 @@ function must(v, name) {
 must(BOT_TOKEN, "BOT_TOKEN");
 must(UPSTASH_REDIS_REST_URL, "UPSTASH_REDIS_REST_URL");
 must(UPSTASH_REDIS_REST_TOKEN, "UPSTASH_REDIS_REST_TOKEN");
-must(GROUP_ID, "GROUP_ID");
 must(OWNER_ID, "OWNER_ID");
 
 /* ================= REDIS ================= */
@@ -38,10 +34,11 @@ const redis = new Redis({
   token: UPSTASH_REDIS_REST_TOKEN
 });
 
-const KEY_PREFIX = "lucky77:v4";
+const KEY_PREFIX = "lucky77:v5";
 const KEY_MEMBERS = `${KEY_PREFIX}:members`;
 const KEY_MEMBER = (id) => `${KEY_PREFIX}:member:${id}`;
 const KEY_WINNERS = `${KEY_PREFIX}:winners`;
+const KEY_GROUP_ID = `${KEY_PREFIX}:group_id`;
 
 /* ================= BOT ================= */
 
@@ -57,15 +54,9 @@ let BOT_USERNAME = null;
 
 /* ================= HELPERS ================= */
 
-function excluded(id) {
-  if (String(id) === String(OWNER_ID)) return true;
-  if (EXCLUDE_IDS && EXCLUDE_IDS.split(",").includes(String(id))) return true;
-  return false;
-}
-
 function nameParts(u) {
   const name = `${u.first_name || ""} ${u.last_name || ""}`.trim();
-  const username = u.username ? u.username : "";
+  const username = u.username || "";
   return { name, username };
 }
 
@@ -76,15 +67,23 @@ function display(u) {
   return String(u.id);
 }
 
+/* ================= AUTO GROUP DETECT ================= */
+
+async function getGroupId() {
+  return await redis.get(KEY_GROUP_ID);
+}
+
+async function setGroupId(id) {
+  await redis.set(KEY_GROUP_ID, String(id));
+  console.log("Group ID Saved:", id);
+}
+
 /* ================= REGISTER FLOW ================= */
 
 async function saveMember(u) {
-  if (excluded(u.id)) return;
-
   const { name, username } = nameParts(u);
 
   await redis.sadd(KEY_MEMBERS, String(u.id));
-
   await redis.hset(KEY_MEMBER(u.id), {
     id: String(u.id),
     name,
@@ -97,10 +96,19 @@ async function saveMember(u) {
 bot.on("message", async (msg) => {
   if (!msg.chat) return;
 
-  // Group Join
-  if (String(msg.chat.id) === String(GROUP_ID) && msg.new_chat_members) {
+  // Auto save group id first time bot sees group
+  if (msg.chat.type === "group" || msg.chat.type === "supergroup") {
+    const saved = await getGroupId();
+    if (!saved) {
+      await setGroupId(msg.chat.id);
+    }
+  }
+
+  const groupId = await getGroupId();
+  if (!groupId) return;
+
+  if (String(msg.chat.id) === String(groupId) && msg.new_chat_members) {
     for (const m of msg.new_chat_members) {
-      if (excluded(m.id)) continue;
 
       const text =
         `🎡 Lucky77 Lucky Wheel\n\n` +
@@ -113,12 +121,12 @@ bot.on("message", async (msg) => {
         ]
       };
 
-      const sent = await bot.sendMessage(GROUP_ID, text, {
+      const sent = await bot.sendMessage(groupId, text, {
         reply_markup: keyboard
       });
 
       setTimeout(() => {
-        bot.deleteMessage(GROUP_ID, sent.message_id).catch(() => {});
+        bot.deleteMessage(groupId, sent.message_id).catch(() => {});
       }, 30000);
     }
   }
@@ -128,17 +136,7 @@ bot.on("message", async (msg) => {
 
 bot.on("callback_query", async (cq) => {
   const data = cq.data || "";
-  const uid = String(cq.from.id);
-
   if (!data.startsWith("reg:")) return;
-
-  if (data.split(":")[1] !== uid) {
-    await bot.answerCallbackQuery(cq.id, {
-      text: "ဒီခလုတ်က မင်းအတွက်ပဲ",
-      show_alert: true
-    });
-    return;
-  }
 
   await saveMember(cq.from);
 
@@ -161,9 +159,10 @@ bot.on("callback_query", async (cq) => {
 
   if (!username && !name) {
     const startUrl = `https://t.me/${BOT_USERNAME}?start=enable`;
+
     await bot.sendMessage(
-      GROUP_ID,
-      `⚠️ Direct link မလုပ်နိုင်ပါ။\nDM Enable ဖို့ Start Bot လုပ်ပါ။`,
+      cq.message.chat.id,
+      `⚠️ DM Enable ဖို့ Start Bot ကိုနှိပ်ပါ။`,
       {
         reply_markup: {
           inline_keyboard: [[{ text: "▶️ Start Bot", url: startUrl }]]
@@ -194,72 +193,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-function auth(req, res, next) {
-  const key = req.query.key || req.headers["x-api-key"];
-  if (key !== API_KEY) return res.status(401).json({ ok: false });
-  next();
-}
-
 app.get("/health", async (req, res) => {
-  const count = await redis.scard(KEY_MEMBERS);
-  res.json({ ok: true, members: count });
-});
-
-/* MEMBERS LIST */
-
-app.get("/api/members", auth, async (req, res) => {
-  const ids = await redis.smembers(KEY_MEMBERS);
-  const list = [];
-
-  for (const id of ids) {
-    const m = await redis.hgetall(KEY_MEMBER(id));
-    list.push({
-      id,
-      name: m.name || "",
-      username: m.username || "",
-      dm_ready: m.dm_ready === "1"
-    });
-  }
-
-  res.json({ ok: true, members: list });
-});
-
-/* NOTICE (DM send) */
-
-app.post("/api/notice", auth, async (req, res) => {
-  const { user_id, text } = req.body;
-
-  try {
-    await bot.sendMessage(Number(user_id), text);
-    res.json({ ok: true });
-  } catch (e) {
-    res.json({ ok: false, error: e.message });
-  }
-});
-
-/* WINNER HISTORY */
-
-app.post("/api/winner", auth, async (req, res) => {
-  const { user_id, prize } = req.body;
-
-  const item = {
-    user_id,
-    prize,
-    at: new Date().toISOString()
-  };
-
-  await redis.lpush(KEY_WINNERS, JSON.stringify(item));
-  await redis.ltrim(KEY_WINNERS, 0, 200);
-
-  res.json({ ok: true });
-});
-
-app.get("/api/winners", auth, async (req, res) => {
-  const list = await redis.lrange(KEY_WINNERS, 0, 200);
-  res.json({
-    ok: true,
-    items: list.map((x) => JSON.parse(x))
-  });
+  const groupId = await getGroupId();
+  res.json({ ok: true, group_id: groupId || null });
 });
 
 app.listen(process.env.PORT || 10000, () =>
