@@ -57,15 +57,15 @@ const redis = new Redis({
 
 // v2 prefix to avoid WRONGTYPE with old keys
 const PREFIX = "lucky77:v2:";
-const KEY_MEMBERS_SET = ${PREFIX}members;           // Set of user_ids
-const KEY_USER_PREFIX = ${PREFIX}user:;             // user:<id> -> JSON
-const KEY_LAST_WINNERS = ${PREFIX}winners:last;     // List (LPUSH)
+const KEY_MEMBERS_SET = `${PREFIX}members`;           // Set of user_ids
+const KEY_USER_PREFIX = `${PREFIX}user:`;             // user:<id> -> JSON
+const KEY_LAST_WINNERS = `${PREFIX}winners:last`;     // List (LPUSH)
 
 // ---------- Bot ----------
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // store pending register message ids -> used for 30s pin logic
-// key: ${chatId}:${userId} -> { chatId, userId, messageId, expiresAt }
+// key: `${chatId}:${userId}` -> { chatId, userId, messageId, expiresAt }
 const pendingRegister = new Map();
 
 // ---------- Helpers ----------
@@ -76,10 +76,10 @@ function isTargetGroup(chatId) {
 function displayNameOf(user) {
   const first = user.first_name || "";
   const last = user.last_name || "";
-  const full = ${first} ${last}.trim();
+  const full = `${first} ${last}`.trim();
   if (full) return full;
-  if (user.username) return @${user.username};
-  return ID:${user.id};
+  if (user.username) return `@${user.username}`;
+  return `ID:${user.id}`;
 }
 
 async function isAlreadyRegistered(userId) {
@@ -127,7 +127,8 @@ async function saveUser(user, chatId) {
 }
 
 function registerKeyboard(registered) {
-  if (registered) {return {
+  if (registered) {
+    return {
       inline_keyboard: [
         [{ text: "Registered ✅", callback_data: "registered_done" }]
       ]
@@ -164,10 +165,10 @@ bot.on("message", async (msg) => {
   if (msg.text && msg.text.trim() === "/id") {
     const chatId = String(msg.chat.id);
     const reply =
-      ✅ Chat ID: ${chatId}\n +
-      Type: ${msg.chat.type}\n +
-      Title: ${msg.chat.title || "-"}\n\n +
-      If you see t.me/c/XXXXXXXXX/... then GROUP_ID should be: -100XXXXXXXXX;
+      `✅ Chat ID: ${chatId}\n` +
+      `Type: ${msg.chat.type}\n` +
+      `Title: ${msg.chat.title || "-"}\n\n` +
+      `If you see t.me/c/XXXXXXXXX/... then GROUP_ID should be: -100XXXXXXXXX`;
     await bot.sendMessage(msg.chat.id, reply);
     return;
   }
@@ -186,9 +187,9 @@ bot.on("message", async (msg) => {
 
       // send register message
       const text =
-        🎉 Welcome ${displayNameOf(u)}!\n\n +
-        ✅ Event ဝင်ရန် **Register** ကိုနှိပ်ပါ။\n +
-        ⏳ 30 seconds အတွင်းမနှိပ်ရင် message ကို Pin ထိုးထားပါမယ်။;
+        `🎉 Welcome ${displayNameOf(u)}!\n\n` +
+        `✅ Event ဝင်ရန် **Register** ကိုနှိပ်ပါ။\n` +
+        `⏳ 30 seconds အတွင်းမနှိပ်ရင် message ကို Pin ထိုးထားပါမယ်။`;
 
       const sent = await bot.sendMessage(msg.chat.id, text, {
         parse_mode: "Markdown",
@@ -199,7 +200,7 @@ bot.on("message", async (msg) => {
       if (already) continue;
 
       // store pending for 30 sec
-      const key = ${msg.chat.id}:${userId};
+      const key = `${msg.chat.id}:${userId}`;
       pendingRegister.set(key, {
         chatId: msg.chat.id,
         userId,
@@ -279,7 +280,8 @@ bot.on("callback_query", async (q) => {
 
   // Save user
   const result = await saveUser(from, msg.chat.id);
-   if (!result.ok) {
+
+  if (!result.ok) {
     let reasonText = "❌ Cannot register.";
     if (result.reason === "ADMIN_EXCLUDED") reasonText = "❌ Admin/Owner ကို Prize ထဲမထည့်ပါ။";
     if (result.reason === "OWNER_EXCLUDED") reasonText = "❌ Owner ကို Prize ထဲမထည့်ပါ။";
@@ -318,7 +320,7 @@ bot.on("callback_query", async (q) => {
   } catch {}
 
   // if that message was pending pin timer, remove pending and delete message after 2 sec (nice)
-  const key = ${msg.chat.id}:${userId};
+  const key = `${msg.chat.id}:${userId}`;
   if (pendingRegister.has(key)) pendingRegister.delete(key);
 });
 
@@ -329,7 +331,7 @@ app.use(express.json());
 
 // Auth middleware
 function requireApiKey(req, res, next) {
-  const key = req.headers["x-api-key"]  req.query.api_key  req.body?.api_key;
+  const key = req.headers["x-api-key"] || req.query.api_key || req.body?.api_key;
   if (!key || String(key) !== String(API_KEY)) {
     return res.status(401).json({ ok: false, error: "Invalid API key" });
   }
@@ -406,6 +408,7 @@ app.get("/winners", requireApiKey, async (req, res) => {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
 // notify winner DM
 app.post("/notify-winner", requireApiKey, async (req, res) => {
   try {
