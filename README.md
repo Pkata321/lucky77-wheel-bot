@@ -1,76 +1,36 @@
-# lucky77-wheel-bot (v2)
+# lucky77-wheel-bot (Render)
 
-Lucky77 Lucky Wheel Event Bot (Render + Upstash Redis)
+Telegram group register + Upstash Redis storage for Lucky77 Lucky Wheel Event.
 
 ## Features
-- Member join group -> Bot sends Register button
-- User presses Register in group -> Popup alert + save user_id into Redis
-- Button becomes Registered ✅ and cannot register twice
-- If user doesn't press Register within 30 seconds, bot will Pin the register message (bot must have pin permission)
-- API endpoints for CodePen (later):
-  - List participants
-  - Pick winner
-  - Winners history
-  - Notify winner via DM
+- When a user joins the group, bot posts a Register button (auto-deletes after 30 seconds)
+- Clicking Register adds the user to the participants list (stored in Upstash Redis)
+- Owner/Admin/Creator accounts are blocked from registering
+- `/id` command in group prints the real Telegram chat id (use this for GROUP_ID)
+- Private `/start` enables DM sending later (Telegram requires user to start the bot before bot can DM)
 
 ---
 
-## Setup (Render)
+## Deploy (Render)
+1) Deploy to Render as **Web Service**
+2) Set Environment Variables (Render → Environment)
 
-### 1) Deploy
-Deploy as Web Service on Render.
-
-### 2) Environment Variables (Render)
-You must set:
-
-- BOT_TOKEN = Telegram bot token
-- UPSTASH_REDIS_REST_URL
-- UPSTASH_REDIS_REST_TOKEN
-- PUBLIC_URL = https://lucky77-wheel-bot.onrender.com
-- API_KEY = Lucky77_luckywheel_77 (use this in CodePen later)
-- OWNER_ID = your telegram numeric user id
-- GROUP_ID = your supergroup id (IMPORTANT)
-
-✅ If you see message link like t.me/c/3542073765/123
-then your GROUP_ID should be:
--1003542073765
+Required:
+- `BOT_TOKEN` = Telegram bot token
+- `UPSTASH_REDIS_REST_URL`
+- `UPSTASH_REDIS_REST_TOKEN`
+- `PUBLIC_URL` = https://lucky77-wheel-bot.onrender.com
+- `API_KEY` = Lucky77_luckywheel_77
+- `OWNER_ID` = (your telegram numeric id)
+- `GROUP_ID` = (your group chat id; use /id in the group)
 
 Optional:
-- EXCLUDE_ADMINS = true/false (default: true)
+- `KEY_PREFIX` = change redis key namespace (default: lucky77:v2:)
 
-### 3) BotFather settings
-- Disable privacy: /setprivacy -> Disable
-- Add bot to group as admin
-  - Needs permission to:
-    - Read messages (privacy disabled already)
-    - Pin messages (if you want auto pin)
+3) Start Command: `npm start`
 
 ---
 
-## Telegram Commands
-- /id -> show Chat ID (use to confirm GROUP_ID)
-
----
-
-## API (for CodePen later)
-All API calls require API key:
-- header: x-api-key: <API_KEY>
-or query/body: api_key=<API_KEY>
-
-### Health
-- GET /
-
-### Participants
-- GET /participants
-
-### Pick winner
-- POST /pick
-
-### Winners history
-- GET /winners
-
-### Notify Winner DM
-- POST /notify-winner
-Body:
-```json
-{ "user_id": "123456789", "text": "🎉 You won!" }
+## Notes
+- For DM winner notifications later, users must press `/start` in private at least once (Telegram limitation).
+- Auto-delete works only if the bot has permission to delete messages in the group.
