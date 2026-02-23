@@ -1,48 +1,62 @@
-# lucky77-wheel-bot (v2)
+# Lucky77 Wheel Bot (Render)
 
-Lucky77 Lucky Wheel Telegram Bot + Render API for CodePen UI.
+## What this bot does
+- In your Telegram Group, when a member joins → bot posts a **Register** button.
+- Member taps Register → bot saves their info to Redis immediately.
+- If member has **username or name** → CodePen can open Telegram chat link (direct).
+- If member is **ID-only** (no username & no name) → bot shows **Start Bot (DM Enable)** button so they can receive DM later.
+- Provides API endpoints for CodePen:
+  - Members list
+  - Notice DM
+  - Winner history
 
-## What it does
-- In Telegram Group:
-  - When a member joins, bot sends a **Register** button message.
-  - Message auto-deletes after **30 seconds**.
-  - Member clicks Register -> saved to Redis.
-  - Button becomes **✅ Registered** (cannot register again).
-- Private DM:
-  - If user has started bot before, bot can DM winner messages.
-  - If user never started bot, Telegram blocks bot from DM -> bot will show "Start Bot" link in group.
+---
 
-## Requirements
-- Bot must be **Admin in the group** (to receive join events reliably & delete messages).
-- Upstash Redis database (REST URL + token)
+## 1) Environment Variables (Render)
+Set these in Render → Environment:
 
-## Render (Web Service) setup
+- BOT_TOKEN
+- UPSTASH_REDIS_REST_URL
+- UPSTASH_REDIS_REST_TOKEN
+- GROUP_ID
+- OWNER_ID
+- API_KEY (example: Lucky77_luckywheel_77)
+- PUBLIC_URL (example: https://lucky77-wheel-bot.onrender.com)
+- EXCLUDE_IDS (optional, comma separated)
 
-### Environment Variables
-Set these in Render -> Environment:
+---
 
-- `BOT_TOKEN` = Telegram bot token
-- `GROUP_ID` = Telegram group id (example: `-3542073765`)
-- `OWNER_ID` = Owner telegram user id (numeric)
-- `API_KEY` = `Lucky77_luckywheel_77` (used by CodePen to call API)
-- `PUBLIC_URL` = `https://lucky77-wheel-bot.onrender.com`
-- `UPSTASH_REDIS_REST_URL` = your Upstash REST URL (https://xxxxx.upstash.io)
-- `UPSTASH_REDIS_REST_TOKEN` = your Upstash REST token
+## 2) Telegram settings
+### Bot must be Admin in the group
+Group → Manage → Administrators → add bot.
+Permissions recommended:
+- Send messages ✅
+- Delete messages ✅ (for auto delete)
+- Manage messages ✅ (safe)
 
-Optional:
-- `EXCLUDE_IDS` = comma separated ids to exclude from member list (admins etc), e.g. `111,222,333`
+### Disable bot privacy
+BotFather → /setprivacy → choose bot → DISABLE
 
-### Start Command
-Render start command:
-- `npm start`
+---
 
-## API Endpoints (for CodePen)
-All endpoints require API key via:
-- header `X-API-KEY: <API_KEY>` OR query `?key=<API_KEY>`
+## 3) Health Check
+Open:
+- GET /health
 
-- `GET /health`
-- `GET /api/members`
-- `POST /api/winner`
-  Body:
-  ```json
-  { "user_id":"123", "prize":"10000Ks", "message":"custom text optional" }
+Example:
+- https://lucky77-wheel-bot.onrender.com/health
+
+---
+
+## 4) API (for CodePen)
+All endpoints require API key:
+- Provide `?key=API_KEY` or header `x-api-key: API_KEY`
+
+### GET /api/members
+Returns members list.
+
+### POST /api/notice
+Send DM to a specific user_id.
+Body:
+```json
+{ "user_id": "123", "text": "Winner..." }
