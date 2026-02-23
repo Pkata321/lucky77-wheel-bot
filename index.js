@@ -14,6 +14,10 @@
 
 require("dotenv").config();
 
+bot.on("message", (msg) => {
+  console.log("CHAT ID:", msg.chat.id);
+});
+
 const express = require("express");
 const cors = require("cors");
 const TelegramBot = require("node-telegram-bot-api");
