@@ -1,16 +1,3 @@
-/* lucky77-wheel-bot (Render) - FINAL
-   ✅ Join => Register button (auto delete 30s)
-   ✅ Register click => save to Redis immediately (NO need DM to save)
-   ✅ Registered click again => popup "Registered already" (show_alert)
-   ✅ ID-only => show Start Bot 안내 + deep link (auto delete 30s)
-   ✅ Exclude OWNER / BOT / EXCLUDE_IDS
-   ✅ API for CodePen:
-      - GET  /api/members?key=API_KEY
-      - POST /api/notice?key=API_KEY   { user_id, text }
-      - POST /api/winner?key=API_KEY   { user_id, prize, message?, send_dm? }
-      - GET  /api/winners?key=API_KEY
-*/
-
 require("dotenv").config();
 
 const express = require("express");
@@ -18,7 +5,7 @@ const cors = require("cors");
 const TelegramBot = require("node-telegram-bot-api");
 const { Redis } = require("@upstash/redis");
 
-// ===================== ENV =====================
+/* ================= ENV ================= */
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -26,16 +13,16 @@ const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 const API_KEY = process.env.API_KEY || "Lucky77_luckywheel_77";
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
 const OWNER_ID = process.env.OWNER_ID ? String(process.env.OWNER_ID) : null;
-const GROUP_ID = process.env.GROUP_ID ? String(process.env.GROUP_ID) : null;
 
-// Optional exclude ids (comma separated)
+// Optional: you can still set GROUP_ID, but we also support auto-detect + save
+const GROUP_ID_ENV = process.env.GROUP_ID ? String(process.env.GROUP_ID) : null;
+
 const EXCLUDE_IDS = (process.env.EXCLUDE_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean)
   .map(String);
 
-// ===================== VALIDATION =====================
 function must(v, name) {
   if (!v) {
     console.error(`${name} missing`);
@@ -46,21 +33,28 @@ must(BOT_TOKEN, "BOT_TOKEN");
 must(UPSTASH_REDIS_REST_URL, "UPSTASH_REDIS_REST_URL");
 must(UPSTASH_REDIS_REST_TOKEN, "UPSTASH_REDIS_REST_TOKEN");
 must(OWNER_ID, "OWNER_ID");
-must(GROUP_ID, "GROUP_ID");
 
-// ===================== REDIS =====================
+/* ================= REDIS ================= */
 const redis = new Redis({
   url: UPSTASH_REDIS_REST_URL,
   token: UPSTASH_REDIS_REST_TOKEN,
 });
 
-const KEY_PREFIX = "lucky77:vFINAL";
-const KEY_MEMBERS_SET = `${KEY_PREFIX}:members:set`; // SET user_id
-const KEY_MEMBER_HASH = (uid) => `${KEY_PREFIX}:member:${uid}`; // HASH
-const KEY_WINNER_HISTORY = `${KEY_PREFIX}:winners:list`; // LIST json
+const KEY_PREFIX = "lucky77:v6";
+const KEY_MEMBERS_SET = `${KEY_PREFIX}:members:set`;
+const KEY_MEMBER_HASH = (uid) => `${KEY_PREFIX}:member:${uid}`;
+const KEY_WINNER_HISTORY = `${KEY_PREFIX}:winners:list`;
+const KEY_GROUP_ID = `${KEY_PREFIX}:group_id`; // auto-detected group_id storage
 
-// ===================== BOT =====================
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+/* ================= BOT ================= */
+const bot = new TelegramBot(BOT_TOKEN, {
+  polling: {
+    params: {
+      // join event အတွက် message updates လိုတယ်
+      allowed_updates: ["message", "callback_query", "my_chat_member", "chat_member"],
+    },
+  },
+});
 
 let BOT_ID = null;
 let BOT_USERNAME = null;
@@ -76,15 +70,11 @@ let BOT_USERNAME = null;
   }
 })();
 
-// ===================== HELPERS =====================
-function isTargetGroup(chatId) {
-  return String(chatId) === String(GROUP_ID);
-}
-
+/* ================= HELPERS ================= */
 function isExcludedUser(userId) {
   const id = String(userId);
-  if (id === OWNER_ID) return true;
-  if (BOT_ID && id === BOT_ID) return true;
+  if (id === String(OWNER_ID)) return true;
+  if (BOT_ID && id === String(BOT_ID)) return true;
   if (EXCLUDE_IDS.includes(id)) return true;
   return false;
 }
@@ -94,12 +84,23 @@ function nameParts(u) {
   const username = u.username ? String(u.username) : "";
   return { name, username };
 }
-
 function display(u) {
   const { name, username } = nameParts(u);
   if (name) return name;
   if (username) return `@${username.replace("@", "")}`;
   return String(u.id);
+}
+
+async function getGroupId() {
+  // priority: ENV > Redis saved
+  if (GROUP_ID_ENV) return GROUP_ID_ENV;
+  const saved = await redis.get(KEY_GROUP_ID);
+  return saved ? String(saved) : null;
+}
+
+async function setGroupId(chatId) {
+  await redis.set(KEY_GROUP_ID, String(chatId));
+  console.log("✅ Group ID saved to Redis:", chatId);
 }
 
 async function isRegistered(uid) {
@@ -117,7 +118,7 @@ async function saveMember(u, source = "group_register") {
   await redis.hset(KEY_MEMBER_HASH(uid), {
     id: uid,
     name,
-    username,
+    username, // no @
     source,
     registered_at: new Date().toISOString(),
     dm_ready: "0",
@@ -127,12 +128,10 @@ async function saveMember(u, source = "group_register") {
 }
 
 async function setDmReady(uid) {
-  try {
-    await redis.hset(KEY_MEMBER_HASH(String(uid)), {
-      dm_ready: "1",
-      dm_ready_at: new Date().toISOString(),
-    });
-  } catch (_) {}
+  await redis.hset(KEY_MEMBER_HASH(String(uid)), {
+    dm_ready: "1",
+    dm_ready_at: new Date().toISOString(),
+  });
 }
 
 async function trySendDM(uid, text) {
@@ -154,19 +153,17 @@ async function sendAutoDelete(chatId, text, opts = {}, ms = 30000) {
   return sent;
 }
 
-// ===================== GROUP JOIN => REGISTER BUTTON =====================
-async function sendRegisterButtonForUser(u) {
-  const uid = String(u.id);
+/* ================= REGISTER UI ================= */
+async function sendRegisterButton(chatId, userObj) {
+  const uid = String(userObj.id);
   if (isExcludedUser(uid)) return;
 
   const already = await isRegistered(uid);
 
   const text =
     `🎡 Lucky77 Lucky Wheel\n\n` +
-    `မင်္ဂလာပါ ${display(u)} 👋\n\n` +
-    (already
-      ? `✅ မင်းက Register လုပ်ပြီးသားပါ။`
-      : `✅ Event ထဲဝင်ဖို့ အောက်က Register ကိုနှိပ်ပါ။`) +
+    `မင်္ဂလာပါ ${display(userObj)} 👋\n\n` +
+    (already ? `✅ Register လုပ်ပြီးသားပါ။` : `✅ Event ထဲဝင်ဖို့ Register ကိုနှိပ်ပါ။`) +
     `\n\n⏳ 30 စက္ကန့်အတွင်း မနှိပ်ရင် message auto-delete ဖြစ်ပါမယ်။`;
 
   const keyboard = {
@@ -179,32 +176,71 @@ async function sendRegisterButtonForUser(u) {
     ],
   };
 
-  const msg = await bot.sendMessage(GROUP_ID, text, { reply_markup: keyboard });
+  const msg = await bot.sendMessage(chatId, text, { reply_markup: keyboard });
 
-  // ✅ 30s auto delete register message
+  // 30s auto delete register message
   setTimeout(async () => {
     try {
-      await bot.deleteMessage(GROUP_ID, msg.message_id);
+      await bot.deleteMessage(chatId, msg.message_id);
     } catch (_) {}
   }, 30000);
 }
 
+/* ================= GROUP LISTENERS ================= */
+
+// Auto-detect group id when bot is added / sees messages
+bot.on("my_chat_member", async (upd) => {
+  try {
+    const chat = upd?.chat;
+    if (!chat) return;
+
+    // If bot added to a group/supergroup -> save it
+    if (chat.type === "group" || chat.type === "supergroup") {
+      const status = upd.new_chat_member?.status;
+      if (status === "member" || status === "administrator") {
+        await setGroupId(chat.id);
+      }
+    }
+  } catch (e) {
+    console.error("my_chat_member error:", e);
+  }
+});
+
+// message handler (join events + /register fallback)
 bot.on("message", async (msg) => {
   try {
     if (!msg.chat) return;
 
-    // ✅ only in target group
-    if (isTargetGroup(msg.chat.id) && msg.new_chat_members?.length) {
+    // Save group id if not set (auto-detect)
+    if (msg.chat.type === "group" || msg.chat.type === "supergroup") {
+      const gid = await getGroupId();
+      if (!gid) await setGroupId(msg.chat.id);
+    }
+
+    const groupId = await getGroupId();
+    if (!groupId) return;
+
+    // Only respond in that group
+    if (String(msg.chat.id) !== String(groupId)) return;
+
+    // Join event
+    if (msg.new_chat_members?.length) {
       for (const m of msg.new_chat_members) {
-        await sendRegisterButtonForUser(m);
+        await sendRegisterButton(groupId, m);
       }
+    }
+
+    // Fallback command: /register (for cases join event not received)
+    const text = (msg.text || "").trim();
+    if (/^\/register(@\w+)?$/i.test(text) && msg.from) {
+      await sendRegisterButton(groupId, msg.from);
     }
   } catch (e) {
     console.error("message handler error:", e);
   }
 });
 
-// ===================== CALLBACK QUERY =====================
+/* ================= CALLBACKS ================= */
 bot.on("callback_query", async (cq) => {
   try {
     const data = cq.data || "";
@@ -217,7 +253,6 @@ bot.on("callback_query", async (cq) => {
       } catch (_) {}
     };
 
-    // ✅ Registered button pressed again => show popup (you asked)
     if (data.startsWith("noop:")) {
       await answer("✅ Registered လုပ်ပြီးသားပါနော်", true);
       return;
@@ -240,21 +275,19 @@ bot.on("callback_query", async (cq) => {
     }
 
     const already = await isRegistered(fromId);
-    if (already) {
-      // ✅ already => popup too
-      await answer("✅ Registered လုပ်ပြီးသားပါနော်", true);
-    } else {
+
+    if (!already) {
       const saved = await saveMember(from, "group_register_button");
       if (!saved.ok) {
         await answer("Register မအောင်မြင်ပါ။", true);
         return;
       }
-
-      // ✅ success popup (bigger)
-      await answer("🎉 Registered!\n\n✅ Register လုပ်ပြီးပါပြီနော်။", true);
+      await answer(`✅ ${display(from)}\nRegister လုပ်ပြီးပါပြီနော် 🎉`, true);
+    } else {
+      await answer(`✅ ${display(from)}\nRegister လုပ်ပြီးသားပါနော်`, true);
     }
 
-    // ✅ lock button to Registered (cannot register again)
+    // Lock button to Registered
     if (cq.message) {
       try {
         await bot.editMessageReplyMarkup(
@@ -264,7 +297,7 @@ bot.on("callback_query", async (cq) => {
       } catch (_) {}
     }
 
-    // ✅ ID-only => show Start Bot 안내 message (auto delete)
+    // ID-only => Start Bot 안내 (auto delete)
     const { name, username } = nameParts(from);
     const isIdOnly = !username && !name;
 
@@ -272,16 +305,16 @@ bot.on("callback_query", async (cq) => {
       const startUrl = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=enable` : null;
 
       const guideText =
-        `⚠️ လူကြီးမင်းရဲ့ Username / Name မရှိသေးလို့ Winner ဖြစ်လာတဲ့အချိန် DM နဲ့ဆက်သွယ်ဖို့ မရနိုင်သေးပါ။\n\n` +
-        `✅ DM Service Enable လုပ်ဖို့ အောက်က "Start Bot" ကိုနှိပ်ပေးပါရှင့်။\n\n` +
-        `📌ညီမတို့ရဲ့ Lucky77 ဟာဆိုရင်တော့ american နိုင်ငံ ထောက်ခံချက်ရ ဂိမ်းဆိုဒ်ကြီးဖစ်တာမို့ မိတ်ဆွေတို့အနေနဲ့ ယုံကြည်စိတ်ချစွာ ကစားနိုင်ပါတယ်ရှင့်။\n` +
-        `ခုလိုစီစဉ်ပေးထားခြင်းကလည်း လူကြီးမင်းတို့ရဲ့ ဆုမဲကံထူးမှုကြီးကို လက်မလွှတ်ရအောင် စီစဉ်ပေးထားတာမို့ တူတူပါဝင်လိုက်ကြစို့...`;
+        `⚠️ DM Service (Winner ဆက်သွယ်ရန်)\n\n` +
+        `Username/Name မရှိသေးလို့ Winner ဖြစ်လာတဲ့အချိန် DM နဲ့ ဆက်သွယ်ဖို့ မရနိုင်သေးပါ။\n\n` +
+        `✅ အောက်က "Start Bot" ကိုနှိပ်ပြီး DM Enable လုပ်ပေးပါရှင့်။\n\n` +
+        `📌 Lucky77 ဟာ american နိုင်ငံ ထောက်ခံချက်ရ ဂိမ်းဆိုဒ်ကြီးဖစ်တာမို့ ယုံကြည်စိတ်ချစွာ ကစားနိုင်ပါတယ်ရှင့်။`;
 
       const opts = startUrl
         ? { reply_markup: { inline_keyboard: [[{ text: "▶️ Start Bot (DM Enable)", url: startUrl }]] } }
         : {};
 
-      await sendAutoDelete(GROUP_ID, guideText, opts, 30000);
+      await sendAutoDelete(cq.message.chat.id, guideText, opts, 30000);
     }
 
   } catch (e) {
@@ -289,15 +322,13 @@ bot.on("callback_query", async (cq) => {
   }
 });
 
-// ===================== PRIVATE /start =====================
+/* ================= PRIVATE /start ================= */
 bot.onText(/\/start/i, async (msg) => {
   try {
     if (msg.chat.type !== "private") return;
-
     const u = msg.from;
     if (!u) return;
 
-    // ensure saved
     await saveMember(u, "private_start");
     await setDmReady(u.id);
 
@@ -310,7 +341,7 @@ bot.onText(/\/start/i, async (msg) => {
   }
 });
 
-// ===================== EXPRESS API =====================
+/* ================= EXPRESS API ================= */
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -323,25 +354,14 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-app.get("/", (req, res) => {
-  res.status(200).send(
-    "Lucky77 wheel bot is running ✅\n\n" +
-      "GET /health\n" +
-      "GET /api/members?key=API_KEY\n" +
-      "POST /api/notice?key=API_KEY\n" +
-      "POST /api/winner?key=API_KEY\n" +
-      "GET /api/winners?key=API_KEY\n"
-  );
-});
-
 app.get("/health", async (req, res) => {
   try {
+    const gid = await getGroupId();
     const count = await redis.scard(KEY_MEMBERS_SET);
     res.json({
       ok: true,
-      service: "lucky77-wheel-bot",
+      group_id: gid || null,
       members: Number(count) || 0,
-      group_id: GROUP_ID,
       bot_username: BOT_USERNAME || null,
       public_url: PUBLIC_URL || null,
     });
@@ -363,7 +383,7 @@ app.get("/api/members", requireApiKey, async (req, res) => {
       members.push({
         id: String(h.id),
         name: (h.name || "").trim(),
-        username: (h.username || "").trim(), // without @
+        username: (h.username || "").trim(),
         dm_ready: String(h.dm_ready || "0") === "1",
         registered_at: h.registered_at || "",
         source: h.source || "",
@@ -377,7 +397,6 @@ app.get("/api/members", requireApiKey, async (req, res) => {
   }
 });
 
-// DM Notice: { user_id, text }
 app.post("/api/notice", requireApiKey, async (req, res) => {
   try {
     const { user_id, text } = req.body || {};
@@ -392,7 +411,6 @@ app.post("/api/notice", requireApiKey, async (req, res) => {
   }
 });
 
-// Winner log: { user_id, prize, message?, send_dm? }
 app.post("/api/winner", requireApiKey, async (req, res) => {
   try {
     const { user_id, prize, message, send_dm } = req.body || {};
@@ -441,7 +459,16 @@ app.get("/api/winners", requireApiKey, async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+app.get("/", (req, res) => {
+  res.status(200).send(
+    "Lucky77 wheel bot is running ✅\n\n" +
+    "GET /health\n" +
+    "GET /api/members?key=API_KEY\n" +
+    "POST /api/notice?key=API_KEY\n" +
+    "POST /api/winner?key=API_KEY\n" +
+    "GET /api/winners?key=API_KEY\n"
+  );
 });
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log("Server running on port", PORT));
