@@ -1,7 +1,7 @@
 {
   "name": "lucky77-wheel-bot",
-  "version": "6.0.0",
-  "description": "Lucky77 Telegram group register + Redis member store + CodePen API",
+  "version": "8.0.0",
+  "description": "Lucky77 Telegram group register + Upstash Redis + CodePen API (Prize turn + No-repeat)",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
