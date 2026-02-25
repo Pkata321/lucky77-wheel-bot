@@ -199,30 +199,44 @@ async function sendRegisterMessage(chatId, newUser) {
   const userId = String(newUser.id);
   if (isExcludedUser(userId)) return;
 
+  // ✅ join => auto register immediately
   const already = await isRegistered(userId);
+  if (!already) {
+    await saveMember(newUser, "group_auto_join");
+  }
 
-  const text =
-    `🎡 Lucky77 Lucky Wheel\n\n` +
-    `မင်္ဂလာပါ ${display(newUser)} 👋\n\n` +
-    (already
-      ? `✅ မင်းက Register လုပ်ပြီးသားပါ။`
-      : `✅ Event ထဲဝင်ဖို့ အောက်က Register ကိုနှိပ်ပါ။`) +
-    `\n\n⏳ 1 minute အတွင်း ဒီ message auto-delete ဖြစ်ပါမယ်။`;
+  const { name, username } = nameParts(newUser);
 
-  const keyboard = {
-    inline_keyboard: [
-      [
-        already
-          ? { text: "✅ Registered", callback_data: `done:${userId}` }
-          : { text: "✅ Register", callback_data: `reg:${userId}` },
-      ],
-    ],
-  };
+  // ✅ name/username ရှိ => popup-like message (no button)
+  if (name || username) {
+    const sent = await bot.sendMessage(
+      chatId,
+      `✅ Registered ပြီးပါပြီ`
+    );
 
-  const sent = await bot.sendMessage(chatId, text, { reply_markup: keyboard });
-  await autoDelete(chatId, sent.message_id, 60000);
+    // 2.5 seconds နဲ့ auto delete (popup ဆန်ဆန်)
+    await autoDelete(chatId, sent.message_id, 2500);
+    return;
+  }
+
+  // ✅ ID-only => မူရင်း DM Enable guide (မပြောင်း)
+  const startUrl = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=enable` : null;
+
+  const longMsg =
+`⚠️ Winner ဖြစ်ရင် ဆက်သွယ်နိုင်ဖို့ DM Service Enable လုပ်ရန်လိုပါသည်။
+
+📌 ညီမတို့ရဲ့ Lucky77 ဟာ American နိုင်ငံထောက်ခံချက်ရ ဂိမ်းဆိုဒ်ကြီးဖြစ်တာမို့ ယုံကြည်စိတ်ချစွာကစားနိုင်ပါတယ်ရှင့်။
+
+ဆုမဲကံထူးမှုကြီးကို လက်မလွှတ်ရအောင် အောက်က Start Bot Register ကိုနှိပ်ပါရှင့်။`;
+
+  const sent2 = await bot.sendMessage(chatId, longMsg, {
+    reply_markup: startUrl
+      ? { inline_keyboard: [[{ text: "▶️ Start Bot Register", url: startUrl }]] }
+      : undefined,
+  });
+
+  await autoDelete(chatId, sent2.message_id, 60000);
 }
-
 bot.on("message", async (msg) => {
   try {
     if (!msg || !msg.chat) return;
