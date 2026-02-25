@@ -1,99 +1,61 @@
-# Lucky77 Wheel Bot — Ver 1.0 Pro (Render + CodePen)
+# Lucky77 Wheel Bot PRO v1.0 (Render)
 
 ## What it does
-- Any group/supergroup where the bot exists:
-  - Member join -> bot sends Register button (auto delete in 1 minute)
-  - Register click -> save member into Redis
-  - Registered click again -> popup shows "Registered already"
-  - ID-only (no name & no username) -> bot shows Start Bot Register link (auto delete in 1 minute)
-- APIs for CodePen:
-  - Save Prize config (Prize + Count)
-  - Spin (returns prize + winner)
-  - Members list / Pool count / History
-  - Notice DM (for ID-only, only after user /start)
+- Group join => bot posts **Register** button (auto delete 60s)
+- Register click => save member to Redis (immediate)
+- If member has **name or username** => CodePen can open chat link directly
+- If member is **ID-only** => bot shows **Start Bot Register** so user can receive DM later
+- CodePen API:
+  - /members, /pool
+  - /config/prizes
+  - /spin, /history
+  - /notice (DM)
+  - /restart-spin
 
 ---
 
 ## Render Environment Variables
-Set these in Render -> Environment:
-
 Required:
 - BOT_TOKEN
 - UPSTASH_REDIS_REST_URL
 - UPSTASH_REDIS_REST_TOKEN
 - OWNER_ID
+- API_KEY
 
-Optional (Recommended):
-- API_KEY  (example: Lucky77_luckywheel_77)
+Optional:
+- GROUP_ID (if set => only that group; if NOT set => works in any group bot is added)
+- EXCLUDE_IDS (comma separated ids to exclude)
+
+Example:
+- API_KEY=Lucky77_luckywheel_77
 
 ---
 
 ## Telegram Setup
-1) Add bot into your group
-2) Make bot admin (recommended permissions):
-- Send messages ✅
-- Delete messages ✅ (auto delete register messages)
-- Manage messages ✅
-
-3) Disable privacy:
-BotFather -> /setprivacy -> choose bot -> DISABLE
+1) Add bot to group as **Admin**
+2) BotFather -> /setprivacy -> choose bot -> **DISABLE**
+3) Give permissions recommended:
+   - Send Messages ✅
+   - Delete Messages ✅
 
 ---
 
-## Health Check
-GET /health
-
-If API_KEY is set, use:
-- /health?key=API_KEY (or header x-api-key)
+## Health
+Open:
+- GET /health
 
 ---
 
-## API (for CodePen)
-If API_KEY is set, pass it via:
-- ?key=API_KEY
-OR
-- header: x-api-key: API_KEY
+## CodePen API usage
+All endpoints require API Key:
+- pass as query: `?key=API_KEY`
+- or header: `x-api-key: API_KEY`
 
-### POST /api/config/prizes
-Body (choose one):
-
-Option A:
-{
-  "prizes": [
-    {"name":"10000Ks","count":10},
-    {"name":"5000Ks","count":2}
-  ]
-}
-
-Option B:
-{
-  "prizeText":"10000Ks 10time\n5000Ks 2time"
-}
-
-### POST /api/spin
-Returns { prize, winner } and saves history.
-Winner is no-repeat (once won, will not win again until restart).
-
-### POST /api/restart
-Clears winners + history and rebuilds prize queue.
-
-### GET /api/members
-Returns members table for UI.
-
-### GET /api/pool
-Returns count of remaining pool (not yet won).
-
-### GET /api/history
-Returns winner history list.
-
-### POST /api/notice
-Body:
-{ "user_id":"123", "text":"Winner message..." }
-
-Only works if member has /start the bot (dm_ready=1).
-
----
-
-## Notes
-- Group ID issue is solved: bot does NOT depend on a single GROUP_ID.
-- Register auto delete = 60 seconds.
+Endpoints:
+- GET  /members
+- GET  /pool
+- POST /config/prizes   { prizeText }
+- POST /spin
+- GET  /history
+- POST /notice          { user_id, text }
+- POST /restart-spin
