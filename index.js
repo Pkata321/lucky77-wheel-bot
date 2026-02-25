@@ -568,5 +568,18 @@ app.post("/restart-spin", requireApiKey, async (req, res) => {
   }
 });
 
+// ✅ Fallback: group ထဲမှာ /register ရိုက်ရင် Register message ပြန်ပို့
+bot.onText(/\/register(@\w+)?/i, async (msg) => {
+  try {
+    if (!msg || !msg.chat) return;
+    if (!targetGroup(msg.chat)) return;
+
+    // /register ကို ရိုက်တဲ့သူကို Register message ပြန်ပို့
+    await sendRegisterMessage(msg.chat.id, msg.from);
+  } catch (e) {
+    console.error("/register error:", e);
+  }
+});
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("Server running on", PORT));
