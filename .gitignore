@@ -1,11 +1,25 @@
----
+# Dependencies
+node_modules/
 
-## 4) .gitignore
-
-```gitignore
-node_modules
+# Environment variables
 .env
-.DS_Store
+
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Optional build output
+dist/
+build/
+
+# Coverage
+coverage/
+
+# Render / temp
+.tmp/
