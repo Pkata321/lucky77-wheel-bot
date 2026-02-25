@@ -556,13 +556,19 @@ app.post("/restart-spin", requireApiKey, async (req, res) => {
     await redis.del(KEY_HISTORY_LIST);
 
     const raw = await redis.get(KEY_PRIZE_SOURCE);
+
     if (raw) {
       const bag = parsePrizeTextExpand(raw);
+
       await redis.del(KEY_PRIZE_BAG);
-      for (const p of bag) await redis.rpush(KEY_PRIZE_BAG, String(p));
+
+      for (const p of bag) {
+        await redis.rpush(KEY_PRIZE_BAG, String(p));
+      }
     }
 
     res.json({ ok: true, reset: true });
+
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
