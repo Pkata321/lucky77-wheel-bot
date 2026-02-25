@@ -1,20 +1,18 @@
 {
-  "name": "lucky77-wheel-bot",
-  "version": "8.0.0",
-  "description": "Lucky77 Telegram group register + Upstash Redis + CodePen API (Prize turn + No-repeat)",
-  "main": "index.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "@upstash/redis": "^1.34.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "node-telegram-bot-api": "^0.66.0"
-  },
-  "engines": {
-    "node": ">=18"
-  }
+"name": "lucky77-wheel-bot",
+"version": "4.0.0",
+"main": "index.js",
+"scripts": {
+"start": "node index.js"
+},
+"dependencies": {
+"@upstash/redis": "^1.34.0",
+"cors": "^2.8.5",
+"dotenv": "^16.4.5",
+"express": "^4.19.2",
+"node-telegram-bot-api": "^0.66.0"
+},
+"engines": {
+"node": "20.x"
+}
 }
