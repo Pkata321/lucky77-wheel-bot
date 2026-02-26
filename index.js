@@ -1,17 +1,17 @@
-  /* Lucky77 Wheel Bot (Render) - PRO v1.0
-   ✅ Group join => Register button (auto delete 60s)
-   ✅ Register click => save member to Redis immediately
-   ✅ If name/username missing => send Start Bot (DM Enable) guide (auto delete 60s)
-   ✅ "Registered" click again => popup shows "already registered"
+/* Lucky77 Wheel Bot (Render) - PRO v1.0 (FINAL)
+   ✅ Group join => AUTO register (NO Register button)
+   ✅ Name/Username member => "✅ Registered ပြီးပါပြီ" (auto delete 2.5s)
+   ✅ ID-only member => keep original DM Enable guide + Start Bot Register (auto delete 60s)
+   ✅ Admin Add Members => also auto register (via chat_member backup)
    ✅ API for CodePen (API_KEY protected):
       - GET  /health
-      - GET  /members        (members list)
-      - GET  /pool           (eligible pool count)
-      - POST /config/prizes  (set prize config)
-      - POST /spin           (spin => prize + random member, no-repeat winner)
-      - GET  /history        (winner history)
-      - POST /notice         (DM a user_id)  (for id-only members)
-      - POST /restart-spin   (reset winners + restore pool)
+      - GET  /members
+      - GET  /pool
+      - POST /config/prizes
+      - POST /spin
+      - GET  /history
+      - POST /notice
+      - POST /restart-spin
 */
 
 "use strict";
@@ -30,8 +30,8 @@ const {
   UPSTASH_REDIS_REST_TOKEN,
   OWNER_ID,
   API_KEY,
-  GROUP_ID,          // optional (if empty => bot works in any group it is added to)
-  EXCLUDE_IDS        // optional: "123,456"
+  GROUP_ID, // optional
+  EXCLUDE_IDS, // optional: "123,456"
 } = process.env;
 
 function must(v, name) {
@@ -54,16 +54,23 @@ const redis = new Redis({
 });
 
 const KEY_PREFIX = "lucky77:pro:v1";
-const KEY_MEMBERS_SET = `${KEY_PREFIX}:members:set`;        // set(user_id)
+const KEY_MEMBERS_SET = `${KEY_PREFIX}:members:set`; // set(user_id)
 const KEY_MEMBER_HASH = (id) => `${KEY_PREFIX}:member:${id}`; // hash
-const KEY_WINNERS_SET = `${KEY_PREFIX}:winners:set`;        // set(user_id) winners
-const KEY_HISTORY_LIST = `${KEY_PREFIX}:history:list`;      // list JSON
-const KEY_PRIZE_BAG = `${KEY_PREFIX}:prizes:bag`;           // list of prizes (expanded)
-const KEY_PRIZE_SOURCE = `${KEY_PREFIX}:prizes:source`;     // raw text
-const KEY_LAST_GROUP = `${KEY_PREFIX}:last_group_id`;       // for health debug
+const KEY_WINNERS_SET = `${KEY_PREFIX}:winners:set`; // set(user_id) winners
+const KEY_HISTORY_LIST = `${KEY_PREFIX}:history:list`; // list JSON
+const KEY_PRIZE_BAG = `${KEY_PREFIX}:prizes:bag`; // list of prizes (expanded)
+const KEY_PRIZE_SOURCE = `${KEY_PREFIX}:prizes:source`; // raw text
+const KEY_LAST_GROUP = `${KEY_PREFIX}:last_group_id`; // for health debug
 
 // ================= Bot =================
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+// ✅ IMPORTANT: include chat_member updates so Admin Add Members can be caught
+const bot = new TelegramBot(BOT_TOKEN, {
+  polling: {
+    params: {
+      allowed_updates: ["message", "callback_query", "chat_member", "my_chat_member"],
+    },
+  },
+});
 
 let BOT_ID = null;
 let BOT_USERNAME = null;
@@ -199,7 +206,7 @@ async function sendRegisterMessage(chatId, newUser) {
   const userId = String(newUser.id);
   if (isExcludedUser(userId)) return;
 
-  // ✅ join => auto register immediately
+  // ✅ join/add => auto register immediately
   const already = await isRegistered(userId);
   if (!already) {
     await saveMember(newUser, "group_auto_join");
@@ -209,21 +216,15 @@ async function sendRegisterMessage(chatId, newUser) {
 
   // ✅ name/username ရှိ => popup-like message (no button)
   if (name || username) {
-    const sent = await bot.sendMessage(
-      chatId,
-      `✅ Registered ပြီးပါပြီ`
-    );
-
-    // 2.5 seconds နဲ့ auto delete (popup ဆန်ဆန်)
+    const sent = await bot.sendMessage(chatId, `✅ Registered ပြီးပါပြီ`);
     await autoDelete(chatId, sent.message_id, 2500);
     return;
   }
 
-  // ✅ ID-only => မူရင်း DM Enable guide (မပြောင်း)
+  // ✅ ID-only => keep original DM Enable guide (NO CHANGE)
   const startUrl = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=enable` : null;
 
-  const longMsg =
-`⚠️ Winner ဖြစ်ရင် ဆက်သွယ်နိုင်ဖို့ DM Service Enable လုပ်ရန်လိုပါသည်။
+  const longMsg = `⚠️ Winner ဖြစ်ရင် ဆက်သွယ်နိုင်ဖို့ DM Service Enable လုပ်ရန်လိုပါသည်။
 
 📌 ညီမတို့ရဲ့ Lucky77 ဟာ American နိုင်ငံထောက်ခံချက်ရ ဂိမ်းဆိုဒ်ကြီးဖြစ်တာမို့ ယုံကြည်စိတ်ချစွာကစားနိုင်ပါတယ်ရှင့်။
 
@@ -237,6 +238,8 @@ async function sendRegisterMessage(chatId, newUser) {
 
   await autoDelete(chatId, sent2.message_id, 60000);
 }
+
+// ✅ Primary: catches normal join/add service message
 bot.on("message", async (msg) => {
   try {
     if (!msg || !msg.chat) return;
@@ -256,85 +259,38 @@ bot.on("message", async (msg) => {
   }
 });
 
-// Registered click => popup
+// ✅ Backup: catches Admin "Add Members" even when new_chat_members doesn't arrive
+bot.on("chat_member", async (upd) => {
+  try {
+    const chat = upd.chat;
+    if (!targetGroup(chat)) return;
+
+    // For debugging
+    await redis.set(KEY_LAST_GROUP, String(chat.id));
+
+    const user = upd.new_chat_member?.user;
+    const oldStatus = upd.old_chat_member?.status;
+    const newStatus = upd.new_chat_member?.status;
+    if (!user) return;
+
+    // user becomes a member (joined/added)
+    const becameMember =
+      (oldStatus === "left" || oldStatus === "kicked" || !oldStatus) &&
+      (newStatus === "member" || newStatus === "restricted");
+
+    if (!becameMember) return;
+
+    await sendRegisterMessage(chat.id, user);
+  } catch (e) {
+    console.error("chat_member handler error:", e);
+  }
+});
+
+// ✅ Minimal callback handler (just in case old inline messages exist)
 bot.on("callback_query", async (cq) => {
   try {
-    const data = cq.data || "";
-    const from = cq.from;
-    const fromId = String(from.id);
-
-    const answer = async (text, alert = true) => {
-      try {
-        await bot.answerCallbackQuery(cq.id, { text, show_alert: alert });
-      } catch (_) {}
-    };
-
-    // done:xxxx => already registered popup
-    if (data.startsWith("done:")) {
-      await answer("✅ Registered လုပ်ထားပြီးသားပါ။", true);
-      return;
-    }
-
-    if (!data.startsWith("reg:")) {
-      await answer("Invalid action", false);
-      return;
-    }
-
-    const targetId = data.split(":")[1];
-    if (!targetId || String(targetId) !== fromId) {
-      await answer("ဒီ Register ခလုတ်က မင်းအတွက်ပဲ သုံးလို့ရပါတယ်။", true);
-      return;
-    }
-
-    if (isExcludedUser(fromId)) {
-      await answer("Owner/Admin/Bot ကို Register မလုပ်ပါ။", true);
-      return;
-    }
-
-    const already = await isRegistered(fromId);
-    if (already) {
-      await answer("✅ Registered လုပ်ထားပြီးသားပါ။", true);
-      return;
-    }
-
-    await saveMember(from, "group_register_button");
-
-    const { name, username } = nameParts(from);
-    if (username || name) {
-      await answer(`${display(from)} Registered လုပ်ပြီးပါပြီနော် 🎉`, true);
-    } else {
-      await answer("DM Enable လုပ်ရန်လိုပါသည်", true);
-
-      // Send guidance message (auto delete)
-      const startUrl = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=enable` : null;
-
-      const longMsg =
-`⚠️ Winner ဖြစ်ရင် ဆက်သွယ်နိုင်ဖို့ DM Service Enable လုပ်ရန်လိုပါသည်။
-
-📌 ညီမတို့ရဲ့ Lucky77 ဟာ American နိုင်ငံထောက်ခံချက်ရ ဂိမ်းဆိုဒ်ကြီးဖြစ်တာမို့ ယုံကြည်စိတ်ချစွာကစားနိုင်ပါတယ်ရှင့်။
-
-ဆုမဲကံထူးမှုကြီးကို လက်မလွှတ်ရအောင် အောက်က Start Bot Register ကိုနှိပ်ပါရှင့်။`;
-
-      const sent2 = await bot.sendMessage(cq.message.chat.id, longMsg, {
-        reply_markup: startUrl
-          ? { inline_keyboard: [[{ text: "▶️ Start Bot Register", url: startUrl }]] }
-          : undefined,
-      });
-      await autoDelete(cq.message.chat.id, sent2.message_id, 60000);
-    }
-
-    // Lock button to Registered (clickable => popup)
-    if (cq.message) {
-      try {
-        await bot.editMessageReplyMarkup(
-          { inline_keyboard: [[{ text: "✅ Registered", callback_data: `done:${fromId}` }]] },
-          { chat_id: cq.message.chat.id, message_id: cq.message.message_id }
-        );
-      } catch (_) {}
-    }
-  } catch (e) {
-    console.error("callback_query error:", e);
-  }
+    await bot.answerCallbackQuery(cq.id, { text: "✅ Registered ပြီးပါပြီ။", show_alert: true });
+  } catch (_) {}
 });
 
 // Private /start => mark dm_ready (for id-only)
@@ -345,8 +301,10 @@ bot.onText(/\/start/i, async (msg) => {
     if (!u) return;
 
     // Ensure member exists (save if needed)
-    await saveMember(u, "private_start");
-    await setDmReady(u.id);
+    if (!isExcludedUser(u.id)) {
+      await saveMember(u, "private_start");
+      await setDmReady(u.id);
+    }
 
     await bot.sendMessage(
       msg.chat.id,
@@ -365,14 +323,14 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/", (req, res) => {
   res.send(
     "Lucky77 Wheel Bot PRO v1.0 ✅\n\n" +
-    "GET  /health\n" +
-    "GET  /members?key=API_KEY\n" +
-    "GET  /pool?key=API_KEY\n" +
-    "POST /config/prizes?key=API_KEY  { prizeText }\n" +
-    "POST /spin?key=API_KEY\n" +
-    "GET  /history?key=API_KEY\n" +
-    "POST /notice?key=API_KEY { user_id, text }\n" +
-    "POST /restart-spin?key=API_KEY\n"
+      "GET  /health\n" +
+      "GET  /members?key=API_KEY\n" +
+      "GET  /pool?key=API_KEY\n" +
+      "POST /config/prizes?key=API_KEY  { prizeText }\n" +
+      "POST /spin?key=API_KEY\n" +
+      "GET  /history?key=API_KEY\n" +
+      "POST /notice?key=API_KEY { user_id, text }\n" +
+      "POST /restart-spin?key=API_KEY\n"
   );
 });
 
@@ -457,9 +415,7 @@ app.post("/config/prizes", requireApiKey, async (req, res) => {
       return res.status(400).json({ ok: false, error: "No valid prizes. Example: 10000Ks 4time" });
     }
 
-    // reset bag
     await redis.del(KEY_PRIZE_BAG);
-    // push all
     for (const p of bag) {
       await redis.rpush(KEY_PRIZE_BAG, String(p));
     }
@@ -477,20 +433,7 @@ function randPick(arr) {
 
 app.post("/spin", requireApiKey, async (req, res) => {
   try {
-    // 1) pick prize from remaining bag
-    const bagLen = await redis.llen(KEY_PRIZE_BAG);
-    if (!bagLen || bagLen <= 0) {
-      return res.status(400).json({ ok: false, error: "No prizes left. Set prizes in Settings and Save." });
-    }
-
-    // get all prizes (small to medium ok)
-    const bag = await redis.lrange(KEY_PRIZE_BAG, 0, bagLen - 1);
-    const prize = randPick(bag);
-
-    // remove one occurrence (lrem)
-    await redis.lrem(KEY_PRIZE_BAG, 1, String(prize));
-
-    // 2) pick member from pool (not winner yet)
+    // 1) ensure members pool exists FIRST (so we don't lose a prize if no member)
     const ids = await redis.smembers(KEY_MEMBERS_SET);
     const eligible = [];
     for (const id of ids || []) {
@@ -500,9 +443,24 @@ app.post("/spin", requireApiKey, async (req, res) => {
     }
 
     if (!eligible.length) {
-      return res.status(400).json({ ok: false, error: "No members left in pool. Restart Spin to reset winners." });
+      return res
+        .status(400)
+        .json({ ok: false, error: "No members left in pool. Restart Spin to reset winners." });
     }
 
+    // 2) pick prize from remaining bag
+    const bagLen = await redis.llen(KEY_PRIZE_BAG);
+    if (!bagLen || bagLen <= 0) {
+      return res.status(400).json({ ok: false, error: "No prizes left. Set prizes in Settings and Save." });
+    }
+
+    const bag = await redis.lrange(KEY_PRIZE_BAG, 0, bagLen - 1);
+    const prize = randPick(bag);
+
+    // remove one occurrence (lrem)
+    await redis.lrem(KEY_PRIZE_BAG, 1, String(prize));
+
+    // 3) pick winner
     const winnerId = randPick(eligible);
     const h = await redis.hgetall(KEY_MEMBER_HASH(winnerId));
 
@@ -510,7 +468,6 @@ app.post("/spin", requireApiKey, async (req, res) => {
     const username = (h?.username || "").trim().replace("@", "");
     const disp = name || (username ? `@${username}` : winnerId);
 
-    // mark winner
     await redis.sadd(KEY_WINNERS_SET, String(winnerId));
 
     const item = {
@@ -538,7 +495,11 @@ app.get("/history", requireApiKey, async (req, res) => {
   try {
     const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
     const history = (list || []).map((s) => {
-      try { return JSON.parse(s); } catch { return { raw: s }; }
+      try {
+        return JSON.parse(s);
+      } catch {
+        return { raw: s };
+      }
     });
     res.json({ ok: true, total: history.length, history });
   } catch (e) {
@@ -546,7 +507,7 @@ app.get("/history", requireApiKey, async (req, res) => {
   }
 });
 
-// ID-only "Notice" DM
+// Notice DM (for id-only AND normal members)
 app.post("/notice", requireApiKey, async (req, res) => {
   try {
     const { user_id, text } = req.body || {};
@@ -573,28 +534,24 @@ app.post("/restart-spin", requireApiKey, async (req, res) => {
 
     if (raw) {
       const bag = parsePrizeTextExpand(raw);
-
       await redis.del(KEY_PRIZE_BAG);
-
       for (const p of bag) {
         await redis.rpush(KEY_PRIZE_BAG, String(p));
       }
     }
 
     res.json({ ok: true, reset: true });
-
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// ✅ Fallback: group ထဲမှာ /register ရိုက်ရင် Register message ပြန်ပို့
+// ✅ Fallback: group ထဲမှာ /register ရိုက်ရင် auto register flow ပဲသုံး
 bot.onText(/\/register(@\w+)?/i, async (msg) => {
   try {
     if (!msg || !msg.chat) return;
     if (!targetGroup(msg.chat)) return;
 
-    // /register ကို ရိုက်တဲ့သူကို Register message ပြန်ပို့
     await sendRegisterMessage(msg.chat.id, msg.from);
   } catch (e) {
     console.error("/register error:", e);
