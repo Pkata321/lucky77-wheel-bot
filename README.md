@@ -33,4 +33,4 @@ Optional:
 - If you use webhook mode, DO NOT run polling in another place.
 - Bot must be Admin in the target group:
   - Delete messages ✅
-  - Pin messages ✅- POST /restart-spin?key=API_KEY
+  - Pin messages ✅
