@@ -503,15 +503,22 @@ app.post("/restart-spin", requireApiKey, async (req, res) => {
   }
 });
 
-// ================= Start Server =================
-const PORT = Number(process.env.PORT || 10000);
+// ================= START SERVER =================
 
-(async () => {
+const PORT = process.env.PORT || 10000;
+
+async function startServer() {
   try {
     await initBot();
-    app.listen(PORT, () => console.log("Server running on", PORT));
-  } catch (e) {
-    console.error("Startup error:", e);
+
+    app.listen(PORT, () => {
+      console.log("Server running on port", PORT);
+    });
+
+  } catch (err) {
+    console.error("Startup error:", err);
     process.exit(1);
   }
-})();});});app.listen(PORT, () => console.log("Server running on", PORT));
+}
+
+startServer();
