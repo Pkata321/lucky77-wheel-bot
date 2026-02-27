@@ -1,45 +1,36 @@
 # Lucky77 Wheel Bot PRO V2 Premium (Render)
 
-## ENV (Render Environment Variables)
-Required:
+## ✅ Features
+- Webhook mode (Fix Telegram 409 Conflict)
+- Group join => silent auto save (id/name/username) into Redis
+- Auto delete join service message in 2 seconds (requires bot admin + Delete messages permission)
+- One pinned message in group: “Enable DM” + button to open bot DM (auto /start register)
+- Private /start register => dm_ready = 1 + registered message
+- API (API_KEY protected):
+  - GET  /health
+  - GET  /members?key=API_KEY
+  - GET  /pool?key=API_KEY
+  - POST /config/prizes?key=API_KEY   { prizeText }
+  - POST /spin?key=API_KEY
+  - GET  /history?key=API_KEY
+  - POST /notice?key=API_KEY         { user_id, text }
+  - POST /restart-spin?key=API_KEY
+
+## ✅ Required Environment Variables (Render)
+- API_KEY
 - BOT_TOKEN
+- OWNER_ID
 - UPSTASH_REDIS_REST_URL
 - UPSTASH_REDIS_REST_TOKEN
-- OWNER_ID
-- API_KEY
-- GROUP_ID
-- PUBLIC_URL   (example: https://lucky77-wheel-bot.onrender.com)
-- WEBHOOK_SECRET (example: Lucky77AutoBotLuckyWheel123123Aa)
+- PUBLIC_URL               (e.g. https://lucky77-wheel-bot.onrender.com)
+- WEBHOOK_SECRET           (random long string)
 
 Optional:
-- EXCLUDE_IDS="123,456"
-- AUTO_DELETE_NOTICE="1" (delete join-notice message)
-- NOTICE_DELETE_MS="3000"
+- GROUP_ID                 (supergroup id e.g. -100xxxxxxxxxx)
+- EXCLUDE_IDS              ("123,456")
 
-## Deploy steps
-1) Put env vars in Render
-2) Deploy (Render will run `npm start`)
-3) Open: `https://<your-render-url>/health`
-   Should show ok=true and bot_username
-
-## Telegram Permissions
-To auto delete join/left system messages:
-- Add bot as admin in the group
-- Give bot permission: Delete messages
-
-## DM Pin (manual)
-Bot will send a DM message with Register button.
-You (user) can pin that DM message manually.
-Bot cannot pin DM by itself (Telegram restriction).
-
-## API for CodePen
-All API endpoints require ?key=API_KEY or header x-api-key: API_KEY
-
-- GET  /health
-- GET  /members?key=API_KEY
-- GET  /pool?key=API_KEY
-- POST /config/prizes?key=API_KEY   { "prizeText":"A\nB\nC" }
-- POST /spin?key=API_KEY           { "user_id":"123" }
-- GET  /history?key=API_KEY
-- POST /notice?key=API_KEY         { "user_id":"123", "text":"hello" }
-- POST /restart-spin?key=API_KEY
+## ✅ Notes
+- If you use webhook mode, DO NOT run polling in another place.
+- Bot must be Admin in the target group:
+  - Delete messages ✅
+  - Pin messages ✅- POST /restart-spin?key=API_KEY
