@@ -1,7 +1,6 @@
 {
   "name": "lucky77-wheel-bot-pro-v2-premium",
   "version": "2.0.0",
-  "description": "Lucky77 Wheel Bot PRO v2 Premium (Render) - Webhook, DM Register, Auto-delete join/leave",
   "main": "index.js",
   "type": "commonjs",
   "engines": {
