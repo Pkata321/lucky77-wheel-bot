@@ -1,13 +1,22 @@
 "use strict";
 
-require("dotenv").config();
+/**
+ * Lucky77 Wheel Bot PRO V2 Premium (Render)
+ * - Webhook only (avoid 409)
+ * - Express API for CodePen (API_KEY protected)
+ * - Group join: auto delete Telegram service join/left messages (need admin + delete permission)
+ * - Group join: silently save member (no popup)
+ * - Group shows "Join notice + DM button" (optional auto-delete that message)
+ * - DM: show ONLY one Register button message; clicking edits same message to "Registered ✅"
+ */
 
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 const TelegramBot = require("node-telegram-bot-api");
 const { Redis } = require("@upstash/redis");
 
-// ===================== ENV =====================
+// ========================= ENV =========================
 const {
   BOT_TOKEN,
   UPSTASH_REDIS_REST_URL,
@@ -18,13 +27,15 @@ const {
   PUBLIC_URL,
   WEBHOOK_SECRET,
 
-  EXCLUDE_IDS,
-  DM_SILENT,
-  PIN_REGISTER_MSG
+  // optional
+  EXCLUDE_IDS,          // "123,456"
+  AUTO_DELETE_NOTICE,   // "1" => delete bot's own join-notice msg after few seconds
+  NOTICE_DELETE_MS,     // "3000"
 } = process.env;
 
 function must(v, name) {
-  if (!v || String(v).trim() === "") throw new Error(`Missing env: ${name}`);
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
 }
 
 must(BOT_TOKEN, "BOT_TOKEN");
@@ -36,514 +47,411 @@ must(GROUP_ID, "GROUP_ID");
 must(PUBLIC_URL, "PUBLIC_URL");
 must(WEBHOOK_SECRET, "WEBHOOK_SECRET");
 
-// ===================== CONST / KEYS =====================
-const PORT = Number(process.env.PORT || 10000);
-const GROUP_ID_STR = String(GROUP_ID);
+const PORT = Number(process.env.PORT || 10000); // Render will provide PORT
 
+// ========================= Redis =========================
 const redis = new Redis({
   url: UPSTASH_REDIS_REST_URL,
-  token: UPSTASH_REDIS_REST_TOKEN
+  token: UPSTASH_REDIS_REST_TOKEN,
 });
 
-const KEY_MEMBERS_SET = "members:set";
-const KEY_MEMBER_HASH_PREFIX = "member:"; // member:<id>
-const KEY_HISTORY = "spin:history"; // list of json
-const KEY_WINNERS = "spin:winners"; // list of json
-const KEY_PRIZES = "prizes:all"; // json array
-const KEY_POOL = "prize:pool"; // list
-const KEY_LAST_GROUP_SEEN = "group:last_seen";
-const KEY_DM_READY_PREFIX = "dm:ready:"; // dm:ready:<id> = "1"
-const KEY_DM_PIN_MSG_PREFIX = "dm:pinmsg:"; // dm:pinmsg:<id> = messageId
-const KEY_WELCOME_SENT_PREFIX = "welcome:sent:"; // welcome:sent:<userId> anti-spam
+// Redis keys
+const KEY_MEMBERS_SET = "l77:members:set";
+const KEY_MEMBER_HASH = (id) => `l77:member:${id}`;         // hash/object
+const KEY_HISTORY_LIST = "l77:history:list";                // list of JSON strings
+const KEY_PRIZES = "l77:prizes:list";                       // list of prize text
+const KEY_WINNERS_LIST = "l77:winners:list";                // list of JSON strings
+const KEY_LAST_GROUP_SEEN = "l77:last_group_seen";          // string
 
-// ===================== HELPERS =====================
-const excludedSet = new Set(
+// ========================= Helpers =========================
+const excludedIds = new Set(
   String(EXCLUDE_IDS || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean)
 );
 
-function isExcludedUser(userId) {
-  return excludedSet.has(String(userId));
-}
-
-function isOwner(userId) {
-  return String(userId) === String(OWNER_ID);
+function isExcluded(userId) {
+  return excludedIds.has(String(userId));
 }
 
 function targetGroup(chat) {
   if (!chat) return false;
-  const type = String(chat.type || "");
-  if (type !== "group" && type !== "supergroup") return false;
-  return String(chat.id) === GROUP_ID_STR;
+  // group or supergroup
+  const t = String(chat.type || "");
+  if (t !== "group" && t !== "supergroup") return false;
+  return String(chat.id) === String(GROUP_ID);
 }
 
-function fullName(u) {
-  const fn = (u.first_name || "").trim();
-  const ln = (u.last_name || "").trim();
-  const name = `${fn} ${ln}`.trim();
-  return name || (u.username ? `@${u.username}` : String(u.id));
-}
-
-async function saveMember(u, source) {
-  if (!u || !u.id) return { ok: false, reason: "no_user" };
-  if (isExcludedUser(u.id)) return { ok: false, reason: "excluded" };
-
-  const id = String(u.id);
-  const username = u.username ? String(u.username) : "";
-  const name = fullName(u);
-
-  // store member record
-  await redis.set(`${KEY_MEMBER_HASH_PREFIX}${id}`, JSON.stringify({
-    id,
-    username,
-    name,
-    source: source || "",
-    updated_at: new Date().toISOString()
-  }));
-
-  // member set
-  await redis.sadd(KEY_MEMBERS_SET, id);
-
-  return { ok: true };
-}
-
-async function getMember(id) {
-  const raw = await redis.get(`${KEY_MEMBER_HASH_PREFIX}${String(id)}`);
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
-}
-
-async function setDmReady(userId) {
-  await redis.set(`${KEY_DM_READY_PREFIX}${String(userId)}`, "1");
-}
-
-async function isDmReady(userId) {
-  return (await redis.get(`${KEY_DM_READY_PREFIX}${String(userId)}`)) === "1";
+function deepLinkRegister(botUsername) {
+  // https://t.me/<bot>?start=register
+  return `https://t.me/${botUsername}?start=register`;
 }
 
 async function safeDelete(chatId, messageId) {
   try {
     await bot.deleteMessage(chatId, messageId);
-  } catch (_) {
-    // ignore
-  }
+  } catch (_) {}
 }
 
-async function autoDelete(chatId, messageId, ms = 2500) {
+async function autoDelete(chatId, messageId, ms = 3000) {
   setTimeout(() => safeDelete(chatId, messageId), ms);
 }
 
-function requireApiKey(req, res) {
-  const k = String(req.query.key || "");
-  if (k !== String(API_KEY)) {
-    res.status(401).json({ ok: false, error: "invalid_key" });
-    return false;
-  }
-  return true;
+function nameParts(u) {
+  const first = (u && u.first_name) ? String(u.first_name) : "";
+  const last = (u && u.last_name) ? String(u.last_name) : "";
+  const full = `${first} ${last}`.trim();
+  return { first, last, full };
 }
 
-async function ensurePoolFromPrizes(prizes) {
-  // reset pool list
-  await redis.del(KEY_POOL);
-  if (!Array.isArray(prizes)) return;
-  for (const p of prizes) {
-    const t = String(p || "").trim();
-    if (t) await redis.rpush(KEY_POOL, t);
-  }
+async function saveMember(u, source = "unknown") {
+  if (!u || !u.id) return { ok: false, reason: "no_user" };
+  const userId = String(u.id);
+
+  if (isExcluded(userId)) return { ok: false, reason: "excluded" };
+
+  const { full } = nameParts(u);
+  const username = u.username ? `@${u.username}` : "";
+
+  await redis.sadd(KEY_MEMBERS_SET, userId);
+  await redis.set(KEY_LAST_GROUP_SEEN, userId);
+
+  // store as JSON string in redis key
+  const obj = {
+    id: userId,
+    username,
+    name: full,
+    source,
+    updated_at: new Date().toISOString(),
+  };
+  await redis.set(KEY_MEMBER_HASH(userId), JSON.stringify(obj));
+
+  return { ok: true };
 }
 
-async function getPrizes() {
-  const raw = await redis.get(KEY_PRIZES);
-  if (!raw) return [];
-  try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
+async function isRegistered(userId) {
+  return await redis.sismember(KEY_MEMBERS_SET, String(userId));
 }
 
-// ===================== BOT (WEBHOOK MODE) =====================
-// IMPORTANT: do NOT use polling -> avoids 409 conflict
+function apiKeyOk(req) {
+  const key = String(req.query.key || req.headers["x-api-key"] || "");
+  return key === String(API_KEY);
+}
+
+// random helper for spin
+function pickRandom(arr) {
+  if (!arr.length) return null;
+  const idx = crypto.randomInt(0, arr.length);
+  return arr[idx];
+}
+
+// ========================= Telegram Bot (Webhook mode) =========================
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 
-let BOT_USERNAME = null;
-let REGISTER_DEEP_LINK = null;
-
-async function initBotProfile() {
-  const me = await bot.getMe();
-  BOT_USERNAME = me.username;
-  REGISTER_DEEP_LINK = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=register` : null;
-}
-
-// ===================== EXPRESS =====================
+// ========================= Express App =========================
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "1mb" }));
 
-// Webhook endpoint (Telegram -> Render)
-app.post(`/webhook/${WEBHOOK_SECRET}`, (req, res) => {
-  try {
-    bot.processUpdate(req.body);
-  } catch (e) {
-    console.error("processUpdate error:", e);
-  }
-  res.sendStatus(200);
+// ---- webhook route (secret path) ----
+const HOOK_PATH = `/webhook/${WEBHOOK_SECRET}`;
+app.post(HOOK_PATH, (req, res) => {
+  // Telegram will POST update JSON here
+  bot.processUpdate(req.body);
+  res.status(200).send("OK");
 });
 
-// Health (no key)
+// ---- health ----
 app.get("/health", async (req, res) => {
-  const members = await redis.scard(KEY_MEMBERS_SET);
-  const winners = await redis.llen(KEY_WINNERS);
-  const remaining = await redis.llen(KEY_POOL);
-  const lastGroupSeen = await redis.get(KEY_LAST_GROUP_SEEN);
+  try {
+    const me = await bot.getMe();
+    const membersCount = Number(await redis.scard(KEY_MEMBERS_SET)) || 0;
+    const winnersCount = Number(await redis.llen(KEY_WINNERS_LIST)) || 0;
+    const remainingPrizes = Number(await redis.llen(KEY_PRIZES)) || 0;
+    const lastSeen = await redis.get(KEY_LAST_GROUP_SEEN);
 
-  res.json({
-    ok: true,
-    bot_username: BOT_USERNAME,
-    group_id_env: String(GROUP_ID),
-    last_group_seen: lastGroupSeen ? String(lastGroupSeen) : null,
-    members,
-    winners,
-    remaining_prizes: remaining,
-    time: new Date().toISOString()
-  });
+    res.json({
+      ok: true,
+      bot_username: me.username,
+      group_id_env: String(GROUP_ID),
+      last_group_seen: lastSeen ? Number(lastSeen) : null,
+      members: membersCount,
+      winners: winnersCount,
+      remaining_prizes: remainingPrizes,
+      time: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e && e.message ? e.message : e) });
+  }
 });
 
-// Members (key)
+// ========================= API (for CodePen) =========================
 app.get("/members", async (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
+  if (!apiKeyOk(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
   const ids = await redis.smembers(KEY_MEMBERS_SET);
-  const list = [];
-  for (const id of ids || []) {
-    const m = await getMember(id);
-    if (m) list.push(m);
-  }
-  res.json({ ok: true, count: list.length, members: list });
+  res.json({ ok: true, count: ids.length, ids });
 });
 
-// Pool (key)
 app.get("/pool", async (req, res) => {
-  if (!requireApiKey(req, res)) return;
-  const pool = await redis.lrange(KEY_POOL, 0, 9999);
-  res.json({ ok: true, count: (pool || []).length, pool: pool || [] });
+  if (!apiKeyOk(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  const prizes = await redis.lrange(KEY_PRIZES, 0, 9999);
+  res.json({ ok: true, prizes, count: prizes.length });
 });
 
-// History (key)
-app.get("/history", async (req, res) => {
-  if (!requireApiKey(req, res)) return;
-  const items = await redis.lrange(KEY_HISTORY, 0, 200);
-  const history = (items || []).map((x) => {
-    try { return JSON.parse(x); } catch { return x; }
-  });
-  res.json({ ok: true, count: history.length, history });
-});
-
-// Config prizes (key)
 app.post("/config/prizes", async (req, res) => {
-  if (!requireApiKey(req, res)) return;
+  if (!apiKeyOk(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  const prizeText = String((req.body && req.body.prizeText) || "").trim();
 
-  let prizes = req.body && req.body.prizes;
+  if (!prizeText) return res.status(400).json({ ok: false, error: "prizeText_required" });
 
-  if (typeof prizes === "string") {
-    prizes = prizes
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
+  const lines = prizeText
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  // reset list
+  await redis.del(KEY_PRIZES);
+  if (lines.length) {
+    // push all
+    await redis.rpush(KEY_PRIZES, ...lines);
   }
 
-  if (!Array.isArray(prizes) || prizes.length === 0) {
-    return res.status(400).json({ ok: false, error: "prizes_required" });
-  }
-
-  await redis.set(KEY_PRIZES, JSON.stringify(prizes));
-  await ensurePoolFromPrizes(prizes);
-
-  res.json({ ok: true, prizes_count: prizes.length });
+  res.json({ ok: true, count: lines.length });
 });
 
-// Spin (key) - for CodePen
 app.post("/spin", async (req, res) => {
-  if (!requireApiKey(req, res)) return;
+  if (!apiKeyOk(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
 
-  const user_id = req.body && (req.body.user_id || req.body.userId);
-  if (!user_id) return res.status(400).json({ ok: false, error: "user_id_required" });
+  const userId = String((req.body && req.body.user_id) || "").trim();
+  if (!userId) return res.status(400).json({ ok: false, error: "user_id_required" });
 
-  const id = String(user_id);
-  const member = await getMember(id);
+  // optional: require registered
+  const reg = await isRegistered(userId);
+  if (!reg) return res.status(403).json({ ok: false, error: "not_registered" });
 
-  // take prize from pool
-  const prize = await redis.lpop(KEY_POOL);
-  if (!prize) {
-    return res.json({ ok: false, error: "no_prizes_left" });
-  }
+  const prizes = await redis.lrange(KEY_PRIZES, 0, 9999);
+  if (!prizes.length) return res.status(400).json({ ok: false, error: "no_prizes" });
 
-  const result = {
-    user_id: id,
-    name: (member && member.name) ? member.name : (req.body.name ? String(req.body.name) : id),
-    username: (member && member.username) ? member.username : "",
-    prize: String(prize),
-    time: new Date().toISOString()
+  const picked = pickRandom(prizes);
+  // remove one instance of picked prize from list (simple rebuild)
+  const remaining = prizes.filter((p, i) => !(p === picked && remaining._removed !== true && (remaining._removed = true)));
+  delete remaining._removed;
+
+  await redis.del(KEY_PRIZES);
+  if (remaining.length) await redis.rpush(KEY_PRIZES, ...remaining);
+
+  const memberJson = await redis.get(KEY_MEMBER_HASH(userId));
+  const member = memberJson ? JSON.parse(memberJson) : { id: userId };
+
+  const win = {
+    time: new Date().toISOString(),
+    user_id: userId,
+    username: member.username || "",
+    name: member.name || "",
+    prize: picked,
   };
 
-  await redis.lpush(KEY_HISTORY, JSON.stringify(result));
-  await redis.lpush(KEY_WINNERS, JSON.stringify(result));
+  await redis.lpush(KEY_WINNERS_LIST, JSON.stringify(win));
+  await redis.ltrim(KEY_WINNERS_LIST, 0, 499); // keep last 500
+  await redis.lpush(KEY_HISTORY_LIST, JSON.stringify({ type: "spin", ...win }));
+  await redis.ltrim(KEY_HISTORY_LIST, 0, 999);
 
-  // optional: notify group
-  try {
-    const msg =
-      `🎉 WINNER!\n` +
-      `👤 ${result.name}${result.username ? ` (@${result.username})` : ""}\n` +
-      `🏆 ${result.prize}`;
-    await bot.sendMessage(GROUP_ID_STR, msg);
-  } catch (_) {}
-
-  res.json({ ok: true, result });
+  res.json({ ok: true, winner: win, remaining_prizes: remaining.length });
 });
 
-// Notice (key)
+app.get("/history", async (req, res) => {
+  if (!apiKeyOk(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  const items = await redis.lrange(KEY_HISTORY_LIST, 0, 199);
+  const parsed = items.map((s) => {
+    try { return JSON.parse(s); } catch { return { raw: s }; }
+  });
+  res.json({ ok: true, items: parsed });
+});
+
 app.post("/notice", async (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
-  const text = req.body && req.body.text ? String(req.body.text) : "";
-  const user_id = req.body && (req.body.user_id || req.body.userId);
-
-  if (!text) return res.status(400).json({ ok: false, error: "text_required" });
+  if (!apiKeyOk(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  const userId = String((req.body && req.body.user_id) || "").trim();
+  const text = String((req.body && req.body.text) || "").trim();
+  if (!userId || !text) return res.status(400).json({ ok: false, error: "user_id_and_text_required" });
 
   try {
-    if (user_id) {
-      await bot.sendMessage(String(user_id), text);
-    } else {
-      await bot.sendMessage(GROUP_ID_STR, text);
-    }
+    await bot.sendMessage(userId, text, { disable_web_page_preview: true });
+    await redis.lpush(KEY_HISTORY_LIST, JSON.stringify({ type: "notice", time: new Date().toISOString(), user_id: userId, text }));
+    await redis.ltrim(KEY_HISTORY_LIST, 0, 999);
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
+    res.status(500).json({ ok: false, error: String(e && e.message ? e.message : e) });
   }
 });
 
-// Restart spin (key)
 app.post("/restart-spin", async (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
-  const prizes = await getPrizes();
-  await redis.del(KEY_HISTORY);
-  await redis.del(KEY_WINNERS);
-  await ensurePoolFromPrizes(prizes);
-
-  res.json({ ok: true, prizes_count: prizes.length });
+  if (!apiKeyOk(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  // Just clear winners/history, keep members by default
+  await redis.del(KEY_WINNERS_LIST);
+  await redis.del(KEY_HISTORY_LIST);
+  res.json({ ok: true });
 });
 
-// ===================== BOT HANDLERS =====================
+// ========================= Telegram Behaviors =========================
 
-// 1) Auto delete join/left service messages + track members silently
+// 1) Delete Telegram system join/left messages (requires bot admin + delete permission)
 bot.on("message", async (msg) => {
-  try {
-    if (!msg || !msg.chat) return;
-
-    // Track group activity
-    if (targetGroup(msg.chat)) {
-      await redis.set(KEY_LAST_GROUP_SEEN, String(msg.chat.id));
-    }
-
-    // Auto delete join/left messages (needs bot admin)
-    if (targetGroup(msg.chat)) {
-      const isJoin = Array.isArray(msg.new_chat_members) && msg.new_chat_members.length > 0;
-      const isLeft = !!msg.left_chat_member;
-
-      if (isJoin || isLeft) {
-        // delete the service message itself
-        await safeDelete(msg.chat.id, msg.message_id);
-
-        // if new members joined, save them silently (no group reply)
-        if (isJoin) {
-          for (const u of msg.new_chat_members) {
-            if (u && u.id) await saveMember(u, "group_join");
-          }
-        }
-        // nothing else in group (no popup)
-        return;
-      }
-    }
-  } catch (e) {
-    console.error("message handler error:", e);
-  }
-});
-
-// 2) /setup_register in GROUP: bot sends register message + tries PIN (bot must have pin permission)
-bot.onText(/\/setup_register/i, async (msg) => {
   try {
     if (!msg || !msg.chat) return;
     if (!targetGroup(msg.chat)) return;
 
-    // only owner or group admins
-    const fromId = msg.from && msg.from.id ? msg.from.id : null;
-    if (!fromId) return;
-
-    let isAdmin = false;
-    try {
-      const member = await bot.getChatMember(msg.chat.id, fromId);
-      isAdmin = ["creator", "administrator"].includes(member.status);
-    } catch (_) {}
-
-    if (!isOwner(fromId) && !isAdmin) return;
-
-    const text =
-      "✅ Lucky77 Register\n\n" +
-      "👇 Register လုပ်ဖို့ Button ကိုနှိပ်ပါ။\n" +
-      "(DM ထဲရောက်သွားမယ်)";
-
-    const sent = await bot.sendMessage(msg.chat.id, text, {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "✅ Register (DM)", url: REGISTER_DEEP_LINK || "https://t.me/" }]
-        ]
-      }
-    });
-
-    // Try pin (works only if bot has pin permission)
-    try {
-      await bot.pinChatMessage(msg.chat.id, sent.message_id, { disable_notification: true });
-    } catch (_) {}
-
-    // delete the command message (clean)
-    await safeDelete(msg.chat.id, msg.message_id);
-  } catch (e) {
-    console.error("/setup_register error:", e);
-  }
-});
-
-// 3) /start register in DM: send ONE pin-able message with register button
-bot.onText(/\/start(?:\s+(.+))?/i, async (msg, match) => {
-  try {
-    if (!msg || msg.chat.type !== "private") return;
-    const u = msg.from;
-    if (!u || !u.id) return;
-
-    if (!isExcludedUser(u.id)) {
-      await saveMember(u, "private_start");
-      await setDmReady(u.id);
-    }
-
-    const payload = (match && match[1]) ? String(match[1]).trim().toLowerCase() : "";
-    const wantPin = String(PIN_REGISTER_MSG || "1") === "1";
-
-    // Only special flow when payload=register
-    if (payload === "register") {
-      // prevent duplicates: keep one message id
-      if (wantPin) {
-        const existingMsgId = await redis.get(`${KEY_DM_PIN_MSG_PREFIX}${String(u.id)}`);
-        if (existingMsgId) {
-          // no extra spam
-          return;
-        }
-      }
-
-      const text =
-        "✅ Register လုပ်ဖို့ Button ကိုနှိပ်ပါ။\n\n" +
-        "📌 ဒီ message ကို *ကိုယ်တိုင် PIN* ထားထားပါ။\n" +
-        "(Bot က pin မလုပ်နိုင်ပါဘူး။ User ပဲ pin လုပ်လို့ရပါတယ်)";
-
-      const sent = await bot.sendMessage(msg.chat.id, text, {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "✅ Confirm Register", callback_data: `reg_confirm:${u.id}` }]
-          ]
-        }
-      });
-
-      if (wantPin) {
-        await redis.set(`${KEY_DM_PIN_MSG_PREFIX}${String(u.id)}`, String(sent.message_id));
-      }
+    // system join / left
+    if (msg.new_chat_members && msg.new_chat_members.length) {
+      await safeDelete(msg.chat.id, msg.message_id);
       return;
     }
-
-    // Default DM: silent (no spam)
-    const silent = String(DM_SILENT || "1") === "1";
-    if (!silent) {
-      await bot.sendMessage(msg.chat.id, "✅ Bot Ready.");
+    if (msg.left_chat_member) {
+      await safeDelete(msg.chat.id, msg.message_id);
+      return;
     }
-  } catch (e) {
-    console.error("/start error:", e);
-  }
+  } catch (_) {}
 });
 
-// 4) Register confirm button (no extra replies; just edit message)
+// 2) Track join via chat_member updates (more reliable)
+bot.on("chat_member", async (upd) => {
+  try {
+    const chat = upd.chat;
+    if (!targetGroup(chat)) return;
+
+    const u = upd.new_chat_member && upd.new_chat_member.user;
+    if (!u || !u.id) return;
+
+    const newStatus = upd.new_chat_member.status; // "member", "administrator", ...
+    const oldStatus = upd.old_chat_member.status;
+
+    const joined =
+      (oldStatus === "left" || oldStatus === "kicked") &&
+      (newStatus === "member" || newStatus === "administrator" || newStatus === "creator");
+
+    if (joined) {
+      // silently save on join (no popup)
+      await saveMember(u, "group_auto");
+
+      // send join notice with DM button (this is what you want to "bait" them to DM)
+      const me = await bot.getMe();
+      const url = deepLinkRegister(me.username);
+
+      const noticeText =
+        "✅ Welcome!\n\n" +
+        "Register လုပ်ဖို့အောက်က button ကိုနှိပ်ပြီး DM ထဲသွားပါ။\n" +
+        "(*Register မလုပ်ရင် spin မရနိုင်ပါ*)";
+
+      const sent = await bot.sendMessage(chat.id, noticeText, {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "📩 DM ထဲသွားပြီး Register လုပ်မယ်", url }],
+          ],
+        },
+      });
+
+      // optional: auto delete this notice to avoid clutter
+      if (String(AUTO_DELETE_NOTICE || "") === "1") {
+        const ms = Number(NOTICE_DELETE_MS || 3000);
+        autoDelete(chat.id, sent.message_id, ms);
+      }
+    }
+  } catch (_) {}
+});
+
+// 3) /start handler (DM)
+bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+  try {
+    const chatId = msg.chat.id;
+    const from = msg.from;
+
+    const payload = (match && match[1]) ? String(match[1]).trim() : "";
+    const { full } = nameParts(from);
+
+    // Save when DM starts as well
+    if (from && from.id) {
+      await saveMember(from, "dm_start");
+    }
+
+    // ONLY show one message with register button (no extra replies)
+    const isReg = from && from.id ? await isRegistered(from.id) : false;
+
+    const baseText =
+      `👤 Name: ${full || "-"}\n` +
+      `🆔 ID: ${from && from.id ? from.id : "-"}\n` +
+      `🔖 Username: ${from && from.username ? "@"+from.username : "-"}\n\n` +
+      (isReg ? "✅ Status: Registered\n" : "⚠️ Status: Not registered\n") +
+      "\nအောက်က Register button ကိုနှိပ်ပါ။";
+
+    // If payload is register OR normal start, show same.
+    await bot.sendMessage(chatId, baseText, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: isReg ? "✅ Registered" : "✅ Register", callback_data: "do_register" }],
+        ],
+      },
+    });
+  } catch (_) {}
+});
+
+// 4) Callback register button
 bot.on("callback_query", async (q) => {
   try {
     if (!q || !q.data) return;
 
-    if (q.data.startsWith("reg_confirm:")) {
-      const uid = q.data.split(":")[1];
-      const from = q.from;
+    if (q.data === "do_register") {
+      const u = q.from;
+      if (!u || !u.id) return;
 
-      // only allow same user
-      if (!from || String(from.id) !== String(uid)) {
-        try { await bot.answerCallbackQuery(q.id, { text: "Not allowed", show_alert: true }); } catch (_) {}
-        return;
+      await saveMember(u, "dm_register_click");
+
+      // Edit SAME message -> no new reply message
+      const { full } = nameParts(u);
+      const newText =
+        `👤 Name: ${full || "-"}\n` +
+        `🆔 ID: ${u.id}\n` +
+        `🔖 Username: ${u.username ? "@"+u.username : "-"}\n\n` +
+        `✅ Registered ပြီးပါပြီ`;
+
+      if (q.message) {
+        await bot.editMessageText(newText, {
+          chat_id: q.message.chat.id,
+          message_id: q.message.message_id,
+          reply_markup: { inline_keyboard: [[{ text: "✅ Registered", callback_data: "noop" }]] },
+        });
       }
 
-      if (!isExcludedUser(from.id)) {
-        await saveMember(from, "dm_register_button");
-        await setDmReady(from.id);
-      }
-
-      // edit pinned message content to "registered"
-      try {
-        await bot.editMessageText(
-          "✅ Registered ပြီးပါပြီ။\n\n📌 ဒီ message ကို PIN ထားထားပါ။",
-          {
-            chat_id: q.message.chat.id,
-            message_id: q.message.message_id,
-            reply_markup: { inline_keyboard: [[{ text: "✅ Registered", callback_data: "noop" }]] }
-          }
-        );
-      } catch (_) {}
-
-      try { await bot.answerCallbackQuery(q.id, { text: "Registered", show_alert: false }); } catch (_) {}
+      await bot.answerCallbackQuery(q.id, { text: "Registered ✅", show_alert: false });
       return;
     }
 
-    // noop
-    try { await bot.answerCallbackQuery(q.id); } catch (_) {}
-  } catch (e) {
-    console.error("callback_query error:", e);
-  }
+    if (q.data === "noop") {
+      await bot.answerCallbackQuery(q.id, { text: "✅", show_alert: false });
+      return;
+    }
+  } catch (_) {}
 });
 
-// ===================== START SERVER (FIX) =====================
+// ========================= Start server + set webhook (NO DOUBLE LISTEN) =========================
 async function startServer() {
-  await initBotProfile();
+  // set webhook to our render URL
+  const hookUrl = `${String(PUBLIC_URL).replace(/\/+$/, "")}${HOOK_PATH}`;
+  await bot.setWebHook(hookUrl, {
+    secret_token: String(WEBHOOK_SECRET), // extra safety; telegram will send header
+    allowed_updates: ["message", "callback_query", "chat_member"],
+  });
 
-  // Set webhook (avoids 409 conflict)
-  const hookUrl = `${String(PUBLIC_URL).replace(/\/+$/, "")}/webhook/${WEBHOOK_SECRET}`;
+  app.get("/", (_req, res) => {
+    res.type("text").send("Lucky77 Wheel Bot PRO V2 Premium ✅");
+  });
 
-  try {
-    await bot.setWebHook(hookUrl, {
-      allowed_updates: ["message", "callback_query", "chat_member", "my_chat_member"]
-    });
-    console.log("Webhook set:", hookUrl);
-  } catch (e) {
-    console.error("setWebHook error:", e);
-  }
-
-  // One listen only (fix EADDRINUSE)
   app.listen(PORT, () => {
-    console.log("Server running on:", PORT);
-    console.log("Bot:", BOT_USERNAME);
-    console.log("Group:", GROUP_ID_STR);
+    console.log("Server running on PORT:", PORT);
+    console.log("Webhook set to:", hookUrl);
   });
 }
 
-// crash-safe
-process.on("unhandledRejection", (e) => console.error("unhandledRejection:", e));
-process.on("uncaughtException", (e) => console.error("uncaughtException:", e));
-
 startServer().catch((e) => {
-  console.error("startServer fatal:", e);
+  console.error("START ERROR:", e);
   process.exit(1);
-});});startServer();
+});});});startServer();
