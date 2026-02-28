@@ -226,11 +226,12 @@ async function isChannelMember(userId) {
   }
 }
 
+// (keep for manual cleanup button)
 async function ensureChannelMemberOrCleanup(userId) {
   if (!CHANNEL_CHAT) return true;
   const ok = await isChannelMember(userId);
   if (!ok) {
-    await removeMember(userId, "left_channel_or_not_member");
+    await removeMember(userId, "left_channel_or_not_member_manual");
     return false;
   }
   return true;
@@ -325,6 +326,7 @@ app.get("/health", async (req, res) => {
   }
 });
 
+// ✅ FIX: remove auto channel member checking here (to avoid loading)
 app.get("/members", requireApiKey, async (req, res) => {
   try {
     const ids = await redis.smembers(KEY_MEMBERS_SET);
@@ -332,9 +334,6 @@ app.get("/members", requireApiKey, async (req, res) => {
 
     for (const id of ids || []) {
       if (isExcludedUser(id)) continue;
-
-      const okChan = await ensureChannelMemberOrCleanup(id);
-      if (!okChan) continue;
 
       const h = await redis.hgetall(KEY_MEMBER_HASH(id));
       if (!h || !h.id) continue;
@@ -362,6 +361,7 @@ app.get("/members", requireApiKey, async (req, res) => {
   }
 });
 
+// ✅ FIX: remove auto channel member checking here (to avoid loading)
 app.get("/pool", requireApiKey, async (req, res) => {
   try {
     const ids = await redis.smembers(KEY_MEMBERS_SET);
@@ -369,10 +369,6 @@ app.get("/pool", requireApiKey, async (req, res) => {
 
     for (const id of ids || []) {
       if (isExcludedUser(id)) continue;
-
-      const okChan = await ensureChannelMemberOrCleanup(id);
-      if (!okChan) continue;
-
       const isWinner = await redis.sismember(KEY_WINNERS_SET, String(id));
       if (!isWinner) count++;
     }
@@ -402,16 +398,13 @@ app.post("/config/prizes", requireApiKey, async (req, res) => {
   }
 });
 
+// ✅ FIX: remove auto channel member checking here (to avoid loading)
 app.post("/spin", requireApiKey, async (req, res) => {
   try {
     const ids = await redis.smembers(KEY_MEMBERS_SET);
     const eligible = [];
     for (const id of ids || []) {
       if (isExcludedUser(id)) continue;
-
-      const okChan = await ensureChannelMemberOrCleanup(id);
-      if (!okChan) continue;
-
       const isWinner = await redis.sismember(KEY_WINNERS_SET, String(id));
       if (!isWinner) eligible.push(String(id));
     }
@@ -496,11 +489,13 @@ app.post("/notice", requireApiKey, async (req, res) => {
     const ctx = JSON.stringify({ prize: pz, at: new Date().toISOString() });
     await redis.set(KEY_NOTICE_CTX(uid), ctx, { ex: 60 * 60 * 24 * 7 });
 
-    // send DM
-    const dm = await bot.sendMessage(Number(uid), msgText).then(() => ({ ok: true })).catch((e) => ({
-      ok: false,
-      error: e?.response?.body || e?.message || String(e),
-    }));
+    const dm = await bot
+      .sendMessage(Number(uid), msgText)
+      .then(() => ({ ok: true }))
+      .catch((e) => ({
+        ok: false,
+        error: e?.response?.body || e?.message || String(e),
+      }));
 
     res.json({ ok: true, dm_ok: dm.ok, dm_error: dm.ok ? "" : String(dm.error || "") });
   } catch (e) {
@@ -622,6 +617,77 @@ async function proceedRegisterAndReply(chatId, u) {
   await sendRegWelcome(chatId);
 }
 
+// ================= ADMIN TOOLS (MANUAL CLEANUP) =================
+bot.onText(/^\/tools$/i, async (msg) => {
+  try {
+    if (!ownerOnly(msg)) return;
+
+    const kb = {
+      inline_keyboard: [
+        [{ text: "🧹 Sync Channel Members (Cleanup)", callback_data: "admin:syncmembers" }],
+      ],
+    };
+
+    await bot.sendMessage(
+      msg.chat.id,
+      "🔧 Admin Tools\n\nဒီ button ကို တစ်လတစ်ခါ နှိပ်ပြီး Channel member စစ်/cleanup လုပ်နိုင်ပါတယ်။",
+      { reply_markup: kb }
+    );
+  } catch (e) {
+    console.error("/tools error:", e);
+  }
+});
+
+async function syncChannelMembersManual(ownerChatId) {
+  if (!CHANNEL_CHAT) {
+    await bot.sendMessage(ownerChatId, "ℹ️ CHANNEL_CHAT မရှိလို့ sync မလုပ်ပါ။");
+    return;
+  }
+
+  const ids = await redis.smembers(KEY_MEMBERS_SET);
+  const total = (ids || []).length;
+
+  if (!total) {
+    await bot.sendMessage(ownerChatId, "ℹ️ Members မရှိသေးပါ။");
+    return;
+  }
+
+  let removed = 0;
+  let checked = 0;
+
+  const progressMsg = await bot.sendMessage(
+    ownerChatId,
+    `⏳ Sync started...\nChecked: 0/${total}\nRemoved: 0`
+  );
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  for (const id of ids || []) {
+    if (isExcludedUser(id)) continue;
+
+    const ok = await ensureChannelMemberOrCleanup(id);
+    if (!ok) removed++;
+
+    checked++;
+
+    if (checked % 25 === 0 || checked === total) {
+      try {
+        await bot.editMessageText(
+          `⏳ Sync running...\nChecked: ${checked}/${total}\nRemoved: ${removed}`,
+          { chat_id: ownerChatId, message_id: progressMsg.message_id }
+        );
+      } catch (_) {}
+    }
+
+    await sleep(120);
+  }
+
+  await bot.sendMessage(
+    ownerChatId,
+    `✅ Sync done!\n\nTotal: ${total}\nChecked: ${checked}\nRemoved: ${removed}\nRemaining: ${Math.max(0, total - removed)}`
+  );
+}
+
 // ================= CALLBACKS =================
 bot.on("callback_query", async (q) => {
   try {
@@ -631,6 +697,17 @@ bot.on("callback_query", async (q) => {
 
     if (!chatId) {
       try { await bot.answerCallbackQuery(q.id); } catch (_) {}
+      return;
+    }
+
+    // admin sync button
+    if (data === "admin:syncmembers") {
+      if (fromId !== String(OWNER_ID)) {
+        await bot.answerCallbackQuery(q.id, { text: "Owner only.", show_alert: true });
+        return;
+      }
+      await bot.answerCallbackQuery(q.id, { text: "Sync started..." });
+      await syncChannelMembersManual(chatId);
       return;
     }
 
@@ -661,7 +738,7 @@ bot.on("callback_query", async (q) => {
   }
 });
 
-// ================= GROUP HANDLERS =================
+// ================= GROUP + PRIVATE MESSAGE HANDLERS =================
 bot.on("message", async (msg) => {
   try {
     if (!msg || !msg.chat) return;
@@ -729,7 +806,7 @@ bot.onText(/^\/start(?:\s+(.+))?/i, async (msg) => {
     const u = msg.from;
     if (!u) return;
 
-    // Channel gate
+    // Channel gate (only here / button, NOT in endpoints)
     if (CHANNEL_CHAT) {
       const ok = await isChannelMember(u.id);
       if (!ok) {
@@ -849,7 +926,6 @@ bot.onText(/^\/upload$/i, async (msg) => {
     if (pRegCap) { await redis.set(KEY_REG_CAP, String(pRegCap)); await redis.del(KEY_PENDING_REG_CAP); changed++; report.push("✅ Reg Caption applied"); }
     if (pRegBtn) { await redis.set(KEY_REG_BTN, String(pRegBtn)); await redis.del(KEY_PENDING_REG_BTN); changed++; report.push("✅ Reg Button applied"); }
 
-    // media apply only if both exist (mode+file)
     if (pRegMode && pRegFile) {
       await redis.set(KEY_REG_MODE, String(pRegMode));
       await redis.set(KEY_REG_FILE, String(pRegFile));
@@ -947,13 +1023,13 @@ bot.onText(/^\/uploadchannelpost$/i, async (msg) => {
       sent = await bot.sendMessage(String(CHANNEL_CHAT), cap, { reply_markup: keyboard });
     }
 
-    // Save as LIVE too (so next time default)
+    // Save as LIVE too
     await redis.set(KEY_POST_CAP, String(cap));
     await redis.set(KEY_POST_BTN, String(btn));
     await redis.set(KEY_POST_MODE, String(mode));
     await redis.set(KEY_POST_FILE, String(fileId || ""));
 
-    // Clear pending post keys (avoid accidental repost)
+    // Clear pending post keys
     await redis.del(KEY_PENDING_POST_CAP);
     await redis.del(KEY_PENDING_POST_BTN);
     await redis.del(KEY_PENDING_POST_MODE);
@@ -971,11 +1047,9 @@ bot.onText(/^\/allrestart$/i, async (msg) => {
   try {
     if (!ownerOnly(msg)) return;
 
-    // reset spin
     await redis.del(KEY_WINNERS_SET);
     await redis.del(KEY_HISTORY_LIST);
 
-    // rebuild prize bag
     const raw = await redis.get(KEY_PRIZE_SOURCE);
     if (raw) {
       const bag = parsePrizeTextExpand(raw);
@@ -983,7 +1057,6 @@ bot.onText(/^\/allrestart$/i, async (msg) => {
       for (const p of bag) await redis.rpush(KEY_PRIZE_BAG, String(p));
     }
 
-    // clear pending configs
     await redis.del(KEY_PENDING_JOIN_CAP);
     await redis.del(KEY_PENDING_JOIN_BTN);
     await redis.del(KEY_PENDING_REG_CAP);
@@ -995,10 +1068,12 @@ bot.onText(/^\/allrestart$/i, async (msg) => {
     await redis.del(KEY_PENDING_POST_MODE);
     await redis.del(KEY_PENDING_POST_FILE);
 
-    // clear pin cache so it can repin (or use /update)
     if (GROUP_ID) await redis.del(KEY_PINNED_MSG_ID(String(GROUP_ID)));
 
-    await bot.sendMessage(msg.chat.id, "✅ ALL RESTART DONE!\n- winners/history reset\n- prize bag rebuilt\n- pending configs cleared\n- pin cache cleared");
+    await bot.sendMessage(
+      msg.chat.id,
+      "✅ ALL RESTART DONE!\n- winners/history reset\n- prize bag rebuilt\n- pending configs cleared\n- pin cache cleared"
+    );
   } catch (e) {
     console.error("/allrestart error:", e);
     await bot.sendMessage(msg.chat.id, "❌ allrestart failed: " + (e?.message || String(e)));
