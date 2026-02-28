@@ -823,6 +823,140 @@ bot.onText(/^\/start(?:\s+(.+))?/i, async (msg) => {
 
 // ================= OWNER COMMANDS (DM only) =================
 
+// ================= OWNER COMMAND: /add (DM only) =================
+// ✅ Add member manually by name / username / id (any combination)
+// Examples:
+// /add mg mg
+// /add @mgmg
+// /add id:33984585
+// /add mg mg @mgmg id:33984585
+// /add @mgmg id:33984585
+
+function makeManualIdFromText(txt) {
+  const s = String(txt || "").trim().toLowerCase();
+  // sanitize for redis key safety (no spaces / weird chars)
+  const safe = s
+    .replace(/\s+/g, "_")
+    .replace(/[^\w@.-]+/g, "")
+    .replace(/^@+/, ""); // remove leading @ if any
+  return safe ? `manual:${safe}` : "";
+}
+
+function parseAddPayload(text) {
+  const raw = String(text || "").replace(/^\/add(@\w+)?\s*/i, "").trim();
+  if (!raw) return null;
+
+  const parts = raw.split(/\s+/).filter(Boolean);
+
+  let username = "";
+  let id = "";
+  const nameTokens = [];
+
+  for (const p of parts) {
+    const low = p.toLowerCase();
+
+    // username: @xxx
+    if (p.startsWith("@") && p.length > 1) {
+      username = p.replace("@", "").trim();
+      continue;
+    }
+
+    // id:123 or id=123
+    const m = low.match(/^id[:=](\d+)$/);
+    if (m) {
+      id = m[1];
+      continue;
+    }
+
+    // otherwise -> name token
+    nameTokens.push(p);
+  }
+
+  const name = nameTokens.join(" ").trim();
+
+  if (!name && !username && !id) return null;
+
+  return {
+    name: name || "",
+    username: username || "",
+    id: id ? String(id) : "",
+  };
+}
+
+async function saveMemberManual({ id, username, name }, source = "owner_add") {
+  // Keep original system keys (set + hash). If no numeric id => create manual id.
+  let uid = (id || "").trim();
+
+  if (!uid) {
+    const base = (username || name || "").trim();
+    if (!base) return { ok: false, error: "No usable id/username/name" };
+    uid = makeManualIdFromText(base);
+    if (!uid) return { ok: false, error: "Cannot build manual id" };
+  }
+
+  // Prevent excluded
+  if (isExcludedUser(uid)) return { ok: false, error: "excluded" };
+
+  const already = await redis.sismember(KEY_MEMBERS_SET, String(uid));
+
+  await redis.sadd(KEY_MEMBERS_SET, String(uid));
+  await redis.hset(KEY_MEMBER_HASH(String(uid)), {
+    id: String(uid),
+    name: String(name || "").trim(),
+    username: String(username || "").trim().replace("@", ""),
+    dm_ready: "0",
+    source,
+    registered_at: new Date().toISOString(),
+  });
+
+  return { ok: true, updated: !!already, id: String(uid) };
+}
+
+bot.onText(/^\/add(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
+  try {
+    if (!ownerOnly(msg)) return;
+
+    const payload = parseAddPayload(msg.text || "");
+    if (!payload) {
+      return bot.sendMessage(
+        msg.chat.id,
+        "Usage:\n" +
+          "/add <name> [@username] [id:123]\n\n" +
+          "Examples:\n" +
+          "/add mg mg\n" +
+          "/add @mgmg\n" +
+          "/add id:33984585\n" +
+          "/add mg mg @mgmg id:33984585"
+      );
+    }
+
+    const result = await saveMemberManual(payload, "owner_add");
+
+    if (!result.ok) {
+      return bot.sendMessage(msg.chat.id, "❌ Add failed: " + String(result.error || "unknown"));
+    }
+
+    const display =
+      (payload.name && payload.name.trim()) ||
+      (payload.username ? "@" + payload.username.replace("@", "") : "") ||
+      (payload.id ? payload.id : result.id);
+
+    return bot.sendMessage(
+      msg.chat.id,
+      (result.updated ? "♻️ Updated member\n" : "✅ Added member\n") +
+        `• Display: ${display}\n` +
+        `• Name: ${payload.name ? payload.name : "-"}\n` +
+        `• Username: ${payload.username ? "@" + payload.username.replace("@", "") : "-"}\n` +
+        `• ID: ${payload.id ? payload.id : result.id}\n`
+    );
+  } catch (e) {
+    console.error("/add error:", e);
+    try {
+      await bot.sendMessage(msg.chat.id, "❌ /add error: " + (e?.message || String(e)));
+    } catch (_) {}
+  }
+});
+
 // ---- Join Gate staging ----
 bot.onText(/^\/joincap(?:\s+([\s\S]+))?/i, async (msg, match) => {
   try {
