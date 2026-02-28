@@ -132,7 +132,9 @@ function targetGroup(chat) {
 }
 async function autoDelete(chatId, messageId, ms = 2000) {
   setTimeout(async () => {
-    try { await bot.deleteMessage(chatId, messageId); } catch {}
+    try {
+      await bot.deleteMessage(chatId, messageId);
+    } catch {}
   }, ms);
 }
 
@@ -248,7 +250,10 @@ async function migrateManualToRealIfNeeded(telegramUser) {
   for (const cid of candidateIds) {
     if (!cid.startsWith("manual:")) continue;
     const exists = await redis.sismember(KEY_MEMBERS_SET, cid);
-    if (exists) { manualId = cid; break; }
+    if (exists) {
+      manualId = cid;
+      break;
+    }
   }
   if (!manualId) return { migrated: false };
 
@@ -278,6 +283,9 @@ async function migrateManualToRealIfNeeded(telegramUser) {
     registered_at: old?.registered_at || new Date().toISOString(),
     migrated_from: manualId,
     dm_ready_at: new Date().toISOString(),
+    // ✅ active by default after merge
+    active: "1",
+    left_at: "",
   };
 
   await redis.hset(KEY_MEMBER_HASH(realId), merged);
@@ -317,6 +325,10 @@ async function saveMember(telegramUser, source = "group_join") {
     source,
     registered_at: prev?.registered_at || new Date().toISOString(),
     dm_ready_at: prev?.dm_ready_at || "",
+
+    // ✅ ACTIVE RESET ON JOIN/UPDATE
+    active: "1",
+    left_at: "",
   });
 
   await indexMemberIdentity({ id: userId, name, username });
@@ -331,12 +343,23 @@ async function setDmReady(userId) {
   });
 }
 
+// ✅ remove means FULL DELETE from member list
 async function removeMemberById(userId) {
   const uid = String(userId);
+
+  const h = await redis.hgetall(KEY_MEMBER_HASH(uid)).catch(() => ({}));
+  const u = normalizeUsername(h?.username || "");
+  const n = normalizeName(h?.name || "");
+
   await redis.srem(KEY_MEMBERS_SET, uid);
   await redis.srem(KEY_POOL_SET, uid);
   await redis.srem(KEY_WINNERS_SET, uid);
   await redis.del(KEY_MEMBER_HASH(uid));
+
+  // ✅ clean indexes (recommended)
+  if (u) await redis.del(KEY_USER_INDEX(u));
+  if (n) await redis.del(KEY_NAME_INDEX(n));
+
   return { ok: true };
 }
 
@@ -362,9 +385,15 @@ function parseAddPayload(text) {
 
   for (const p of parts) {
     const low = p.toLowerCase();
-    if (p.startsWith("@") && p.length > 1) { username = p.replace("@", "").trim(); continue; }
+    if (p.startsWith("@") && p.length > 1) {
+      username = p.replace("@", "").trim();
+      continue;
+    }
     const m = low.match(/^id[:=](\d+)$/);
-    if (m) { id = m[1]; continue; }
+    if (m) {
+      id = m[1];
+      continue;
+    }
     nameTokens.push(p);
   }
 
@@ -401,6 +430,10 @@ async function saveMemberManual({ id, username, name }, source = "owner_add") {
     source,
     registered_at: prev?.registered_at || new Date().toISOString(),
     dm_ready_at: prev?.dm_ready_at || "",
+
+    // ✅ manual add default active
+    active: "1",
+    left_at: "",
   });
 
   await indexMemberIdentity({ id: uid, name, username });
@@ -420,9 +453,15 @@ function parseRemovePayload(text) {
 
   for (const p of parts) {
     const low = p.toLowerCase();
-    if (p.startsWith("@") && p.length > 1) { username = p.replace("@", "").trim(); continue; }
+    if (p.startsWith("@") && p.length > 1) {
+      username = p.replace("@", "").trim();
+      continue;
+    }
     const m = low.match(/^id[:=](\d+)$/);
-    if (m) { id = m[1]; continue; }
+    if (m) {
+      id = m[1];
+      continue;
+    }
     nameTokens.push(p);
   }
 
@@ -503,6 +542,10 @@ app.get("/members", requireApiKey, async (req, res) => {
       const username = String(h?.username || "").trim().replace("@", "");
       const display = name || (username ? `@${username}` : id);
 
+      // ✅ inactive support
+      const active = String(h?.active ?? "1") === "1";
+      const left_at = String(h?.left_at || "");
+
       members.push({
         id,
         name,
@@ -510,6 +553,8 @@ app.get("/members", requireApiKey, async (req, res) => {
         display,
         dm_ready: String(h?.dm_ready || "0") === "1",
         isWinner,
+        active,
+        left_at,
         registered_at: String(h?.registered_at || ""),
       });
     }
@@ -587,6 +632,7 @@ app.post("/spin", requireApiKey, async (req, res) => {
         username,
         display,
         dm_ready: String(h?.dm_ready || "0") === "1",
+        active: String(h?.active ?? "1") === "1",
       },
     };
 
@@ -603,7 +649,11 @@ app.get("/history", requireApiKey, async (req, res) => {
   try {
     const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
     const history = (list || []).map((s) => {
-      try { return JSON.parse(s); } catch { return { raw: s }; }
+      try {
+        return JSON.parse(s);
+      } catch {
+        return { raw: s };
+      }
     });
     res.json({ ok: true, total: history.length, history });
   } catch (e) {
@@ -622,11 +672,9 @@ app.post("/notice", requireApiKey, async (req, res) => {
     const msgText =
       text && String(text).trim()
         ? String(text)
-        : (
-            "Congratulation 🥳🥳🥳ပါအကိုရှင့်\n" +
-            `လက်ကီး77 ရဲ့ လစဉ်ဗလာမပါလက်ကီးဝှီး အစီစဉ်မှာ ယူနစ် ${pz || "—"} ကံထူးသွားပါတယ်ရှင့်☘️\n` +
-            "ဂိမ်းယူနစ်လေး ထည့်ပေးဖို့ အကို့ဂိမ်းအကောင့်လေး ပို့ပေးပါရှင့်"
-          );
+        : "Congratulation 🥳🥳🥳ပါအကိုရှင့်\n" +
+          `လက်ကီး77 ရဲ့ လစဉ်ဗလာမပါလက်ကီးဝှီး အစီစဉ်မှာ ယူနစ် ${pz || "—"} ကံထူးသွားပါတယ်ရှင့်☘️\n` +
+          "ဂိမ်းယူနစ်လေး ထည့်ပေးဖို့ အကို့ဂိမ်းအကောင့်လေး ပို့ပေးပါရှင့်";
 
     await redis.set(
       KEY_NOTICE_CTX(uid),
@@ -646,16 +694,20 @@ app.post("/notice", requireApiKey, async (req, res) => {
 });
 
 // ✅ Restart Spin: clears winners/history/pool+bag, BUT keeps members list
+// ✅ IMPORTANT: rebuild pool only for active members
 app.post("/restart-spin", requireApiKey, async (req, res) => {
   try {
     await redis.del(KEY_WINNERS_SET);
     await redis.del(KEY_HISTORY_LIST);
 
-    // rebuild pool from members
+    // rebuild pool from members (active only)
     await redis.del(KEY_POOL_SET);
     const ids = await redis.smembers(KEY_MEMBERS_SET);
     for (const id of ids || []) {
       if (isExcludedUser(id)) continue;
+      const h = await redis.hgetall(KEY_MEMBER_HASH(String(id))).catch(() => ({}));
+      const active = String(h?.active ?? "1") === "1";
+      if (!active) continue;
       await redis.sadd(KEY_POOL_SET, String(id));
     }
 
@@ -673,13 +725,18 @@ app.post("/restart-spin", requireApiKey, async (req, res) => {
   }
 });
 
-// ✅ NEW: rebuild pool only (do NOT clear history)
+// ✅ NEW: rebuild pool only (do NOT clear history) - active only + not winner
 app.post("/rebuild-pool", requireApiKey, async (req, res) => {
   try {
     await redis.del(KEY_POOL_SET);
     const ids = await redis.smembers(KEY_MEMBERS_SET);
     for (const id of ids || []) {
       if (isExcludedUser(id)) continue;
+
+      const h = await redis.hgetall(KEY_MEMBER_HASH(String(id))).catch(() => ({}));
+      const active = String(h?.active ?? "1") === "1";
+      if (!active) continue;
+
       const wasWinner = await redis.sismember(KEY_WINNERS_SET, String(id));
       if (!wasWinner) await redis.sadd(KEY_POOL_SET, String(id));
     }
@@ -720,12 +777,18 @@ async function sendAndPinRegisterMessage(groupId) {
   if (mode === "photo" && fileId) {
     sent = await bot.sendPhoto(gid, fileId, { caption: text, reply_markup: keyboard || undefined });
   } else if (mode === "video" && fileId) {
-    sent = await bot.sendVideo(gid, fileId, { caption: text, reply_markup: keyboard || undefined, supports_streaming: true });
+    sent = await bot.sendVideo(gid, fileId, {
+      caption: text,
+      reply_markup: keyboard || undefined,
+      supports_streaming: true,
+    });
   } else {
     sent = await bot.sendMessage(gid, text, { reply_markup: keyboard || undefined });
   }
 
-  try { await bot.pinChatMessage(gid, sent.message_id, { disable_notification: true }); } catch {}
+  try {
+    await bot.pinChatMessage(gid, sent.message_id, { disable_notification: true });
+  } catch {}
 
   await redis.set(KEY_PINNED_MSG_ID(String(groupId)), String(sent.message_id));
   return sent.message_id;
@@ -784,17 +847,23 @@ bot.onText(/^\/savestart$/i, async (msg) => {
   await bot.sendMessage(msg.chat.id, "✅ Save STARTED. Registrations are open now.");
 });
 
-// ✅ NEW: rebuild pool only (owner DM)
+// ✅ rebuild pool only (owner DM) - active only + not winner
 bot.onText(/^\/rebuildpool$/i, async (msg) => {
   if (!ownerOnly(msg)) return;
   await redis.del(KEY_POOL_SET);
+
   const ids = await redis.smembers(KEY_MEMBERS_SET);
   for (const id of ids || []) {
     if (isExcludedUser(id)) continue;
+
+    const h = await redis.hgetall(KEY_MEMBER_HASH(String(id))).catch(() => ({}));
+    const active = String(h?.active ?? "1") === "1";
+    if (!active) continue;
+
     const wasWinner = await redis.sismember(KEY_WINNERS_SET, String(id));
     if (!wasWinner) await redis.sadd(KEY_POOL_SET, String(id));
   }
-  await bot.sendMessage(msg.chat.id, "✅ Pool rebuilt (history not cleared).");
+  await bot.sendMessage(msg.chat.id, "✅ Pool rebuilt (active only, history not cleared).");
 });
 
 bot.onText(/^\/add(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
@@ -844,7 +913,7 @@ bot.onText(/^\/remove(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
   if (!exists) return bot.sendMessage(msg.chat.id, "ℹ️ Member not found in list.");
 
   await removeMemberById(uid);
-  return bot.sendMessage(msg.chat.id, `✅ Removed member: ${uid}`);
+  return bot.sendMessage(msg.chat.id, `✅ Removed member (deleted): ${uid}`);
 });
 
 // ================= CALLBACK: channel check =================
@@ -876,7 +945,9 @@ bot.on("callback_query", async (q) => {
 
     await bot.answerCallbackQuery(q.id).catch(() => {});
   } catch {
-    try { await bot.answerCallbackQuery(q.id); } catch {}
+    try {
+      await bot.answerCallbackQuery(q.id);
+    } catch {}
   }
 });
 
@@ -891,7 +962,9 @@ bot.on("message", async (msg) => {
       const ctxRaw = await redis.get(KEY_NOTICE_CTX(uid));
       if (ctxRaw) {
         let ctx = {};
-        try { ctx = JSON.parse(ctxRaw); } catch {}
+        try {
+          ctx = JSON.parse(ctxRaw);
+        } catch {}
         const { name, username } = nameParts(msg.from);
 
         const header =
@@ -907,11 +980,12 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    // group join
+    // group join/leave
     if (targetGroup(msg.chat)) {
       await redis.set(KEY_LAST_GROUP, String(msg.chat.id));
       await ensurePinnedRegisterMessage(msg.chat.id);
 
+      // ✅ JOIN
       if (msg.new_chat_members && msg.new_chat_members.length) {
         await autoDelete(msg.chat.id, msg.message_id, 2000);
 
@@ -924,12 +998,28 @@ bot.on("message", async (msg) => {
 
           const already = await isRegistered(u.id);
           if (!already) await saveMember(u, "group_join");
-          else await saveMember(u, "group_join_update");
+          else await saveMember(u, "group_join_update"); // also resets active=1
         }
       }
 
-      // ✅ IMPORTANT: do NOT auto-remove on leave (keep member list)
-      // if (msg.left_chat_member) { ... }  <-- removed
+      // ✅ LEFT => mark inactive (keep in members list; remove from pool)
+      if (msg.left_chat_member) {
+        const u = msg.left_chat_member;
+        if (u && !isExcludedUser(u.id)) {
+          const uid = String(u.id);
+
+          // keep member but mark inactive
+          await redis.sadd(KEY_MEMBERS_SET, uid); // safety
+          await redis.hset(KEY_MEMBER_HASH(uid), {
+            active: "0",
+            left_at: new Date().toISOString(),
+            source: "left_group",
+          });
+
+          // IMPORTANT: prevent winning while inactive
+          await redis.srem(KEY_POOL_SET, uid);
+        }
+      }
     }
   } catch (e) {
     console.error("message handler error:", e);
@@ -979,7 +1069,8 @@ async function boot() {
   if (!(await redis.get(KEY_JOIN_BTN))) await redis.set(KEY_JOIN_BTN, "📢 Join Channel");
 
   if (!(await redis.get(KEY_REG_MODE))) await redis.set(KEY_REG_MODE, "text");
-  if (!(await redis.get(KEY_REG_CAP))) await redis.set(KEY_REG_CAP, "✅ Registered ပြီးပါပြီ。\n\n📩 Prize ပေါက်ရင် ဒီ DM ကနေ ဆက်သွယ်ပေးပါမယ်။");
+  if (!(await redis.get(KEY_REG_CAP)))
+    await redis.set(KEY_REG_CAP, "✅ Registered ပြီးပါပြီ。\n\n📩 Prize ပေါက်ရင် ဒီ DM ကနေ ဆက်သွယ်ပေးပါမယ်။");
   if (!(await redis.get(KEY_REG_BTN))) await redis.set(KEY_REG_BTN, "");
 
   if (!(await redis.get(KEY_SAVE_ENABLED))) await redis.set(KEY_SAVE_ENABLED, "1");
@@ -993,5 +1084,9 @@ const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, "0.0.0.0", async () => {
   console.log("Server running on port", PORT);
-  try { await boot(); } catch (e) { console.error("Boot error:", e); }
+  try {
+    await boot();
+  } catch (e) {
+    console.error("Boot error:", e);
+  }
 });
