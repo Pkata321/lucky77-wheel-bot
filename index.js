@@ -1,39 +1,5 @@
 "use strict";
 
-/**
- * Lucky77 Wheel Bot — PRO V2 Premium (REMAX FULL)
- *
- * ✅ Webhook mode (Fix 409 Conflict)
- * ✅ Group join service message auto delete (2s)
- * ✅ Join => SILENT auto save (id/name/username) (no popup)
- * ✅ Leave => auto remove from members + winners (spin list/member list clean)
- * ✅ One pinned "Register" message in GROUP with Button to DM (/start register)
- * ✅ Owner DM commands (Pin in group):
- *    - /setpin <text>      => set pin caption/text
- *    - /setphoto           => reply to a photo (or send photo with caption "/setphoto")
- *    - /setvideo           => reply to a video (or send video with caption "/setvideo")
- *    - /settext            => pin mode to text only
- *    - /update             => delete old pin, send new (media/text + caption + button) and pin
- *    - /status             => show current pin config
- *
- * ✅ Owner DM commands (DM auto-reply for members /start):
- *    - /regbotDM <text>        => set DM auto reply text
- *    - /setbotimage            => reply to photo (or send photo caption "/setbotimage")
- *    - /setbotvideo            => reply to video (or send video caption "/setbotvideo")
- *    - /setbottext             => DM reply mode = text only
- *    - /dmstatus               => show DM reply status
- *
- * ✅ API endpoints for CodePen (API_KEY protected):
- *    GET  /health
- *    GET  /members?key=API_KEY
- *    GET  /pool?key=API_KEY
- *    POST /config/prizes?key=API_KEY  { prizeText }
- *    POST /spin?key=API_KEY
- *    GET  /history?key=API_KEY
- *    POST /notice?key=API_KEY { user_id, text }
- *    POST /restart-spin?key=API_KEY
- */
-
 require("dotenv").config();
 
 const express = require("express");
@@ -54,6 +20,10 @@ const {
 
   PUBLIC_URL, // Render public URL e.g. https://xxx.onrender.com
   WEBHOOK_SECRET, // random secret string
+
+  // ✅ Channel gate env (Public channel)
+  CHANNEL_CHAT, // e.g. "@lucky77officialchannel"
+  CHANNEL_LINK, // e.g. "https://t.me/lucky77officialchannel"
 } = process.env;
 
 function must(v, name) {
@@ -71,8 +41,9 @@ must(API_KEY, "API_KEY");
 must(PUBLIC_URL, "PUBLIC_URL");
 must(WEBHOOK_SECRET, "WEBHOOK_SECRET");
 
-if (!GROUP_ID) {
-  console.warn("⚠️ GROUP_ID is not set. /update pin from DM needs GROUP_ID.");
+if (!GROUP_ID) console.warn("⚠️ GROUP_ID is not set. /update pin from DM needs GROUP_ID.");
+if (!CHANNEL_CHAT || !CHANNEL_LINK) {
+  console.warn("⚠️ CHANNEL_CHAT / CHANNEL_LINK not set. Channel member-only gate will be skipped.");
 }
 
 // ================= Redis =================
@@ -85,28 +56,34 @@ const redis = new Redis({
 const KEY_PREFIX = "lucky77:pro:v2:remax";
 
 // members
-const KEY_MEMBERS_SET = `${KEY_PREFIX}:members:set`; // set(user_id)
-const KEY_MEMBER_HASH = (id) => `${KEY_PREFIX}:member:${id}`; // hash user
-const KEY_WINNERS_SET = `${KEY_PREFIX}:winners:set`; // set(user_id)
-const KEY_HISTORY_LIST = `${KEY_PREFIX}:history:list`; // list JSON
+const KEY_MEMBERS_SET = `${KEY_PREFIX}:members:set`;
+const KEY_MEMBER_HASH = (id) => `${KEY_PREFIX}:member:${id}`;
+const KEY_WINNERS_SET = `${KEY_PREFIX}:winners:set`;
+const KEY_HISTORY_LIST = `${KEY_PREFIX}:history:list`;
 
 // prizes
-const KEY_PRIZE_BAG = `${KEY_PREFIX}:prizes:bag`; // list expanded
-const KEY_PRIZE_SOURCE = `${KEY_PREFIX}:prizes:source`; // raw text
+const KEY_PRIZE_BAG = `${KEY_PREFIX}:prizes:bag`;
+const KEY_PRIZE_SOURCE = `${KEY_PREFIX}:prizes:source`;
 
 // debug
 const KEY_LAST_GROUP = `${KEY_PREFIX}:last_group_id`;
 
 // pinned group register msg
 const KEY_PINNED_MSG_ID = (gid) => `${KEY_PREFIX}:pinned:${gid}`;
-const KEY_PIN_TEXT = `${KEY_PREFIX}:pin:text`; // caption/text
-const KEY_PIN_MODE = `${KEY_PREFIX}:pin:mode`; // "text"|"photo"|"video"
-const KEY_PIN_FILE = `${KEY_PREFIX}:pin:file_id`; // file_id
+const KEY_PIN_TEXT = `${KEY_PREFIX}:pin:text`;
+const KEY_PIN_MODE = `${KEY_PREFIX}:pin:mode`;
+const KEY_PIN_FILE = `${KEY_PREFIX}:pin:file_id`;
 
 // DM auto reply for /start
 const KEY_DM_TEXT = `${KEY_PREFIX}:dm:text`;
-const KEY_DM_MODE = `${KEY_PREFIX}:dm:mode`; // "text"|"photo"|"video"
+const KEY_DM_MODE = `${KEY_PREFIX}:dm:mode`;
 const KEY_DM_FILE = `${KEY_PREFIX}:dm:file_id`;
+
+// ================= Telegram Bot (Webhook) =================
+const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
+
+let BOT_USERNAME = null;
+let BOT_ID = null;
 
 // ================= Helpers =================
 const excludeIds = (EXCLUDE_IDS || "")
@@ -136,10 +113,7 @@ function targetGroup(chat) {
   if (!chat) return false;
   const t = String(chat.type);
   if (t !== "group" && t !== "supergroup") return false;
-
-  // If GROUP_ID set => only that group
   if (GROUP_ID && String(chat.id) !== String(GROUP_ID)) return false;
-
   return true;
 }
 
@@ -167,7 +141,7 @@ async function saveMember(u, source = "group_join") {
     id: userId,
     name,
     username,
-    dm_ready: "0", // becomes "1" after /start private
+    dm_ready: "0",
     source,
     registered_at: new Date().toISOString(),
   });
@@ -187,7 +161,6 @@ async function removeMember(userId, reason = "left_group") {
   await redis.srem(KEY_MEMBERS_SET, uid);
   await redis.srem(KEY_WINNERS_SET, uid);
   await redis.del(KEY_MEMBER_HASH(uid));
-  // history ကို မဖျက်ဘူး (အရင် winner history ရှိနေရမယ်)
   return { ok: true, reason };
 }
 
@@ -208,6 +181,59 @@ function requireApiKey(req, res, next) {
   next();
 }
 
+// ---------- Channel Gate Helpers ----------
+function getChannelLink() {
+  if (CHANNEL_LINK) return String(CHANNEL_LINK);
+  if (CHANNEL_CHAT) return `https://t.me/${String(CHANNEL_CHAT).replace("@", "")}`;
+  return "";
+}
+
+async function isChannelMember(userId) {
+  if (!CHANNEL_CHAT) return true;
+  try {
+    const m = await bot.getChatMember(String(CHANNEL_CHAT), Number(userId));
+    const st = String(m?.status || "");
+    return st === "member" || st === "administrator" || st === "creator";
+  } catch (_) {
+    return false;
+  }
+}
+
+async function sendJoinGate(chatId, userId) {
+  const link = getChannelLink();
+  const text =
+    "❌ Channel ကို Join ပြီးမှ Register/Enable DM လုပ်နိုင်ပါသည်။\n\n" +
+    (link ? `👉 Join: ${link}` : "👉 Channel ကို Join လုပ်ပါ");
+
+  const kb = {
+    inline_keyboard: [
+      ...(link ? [[{ text: "📢 Join Channel", url: link }]] : []),
+      [{ text: "✅ Joined (Check Again)", callback_data: `chkch:${String(userId)}` }],
+    ],
+  };
+
+  return bot.sendMessage(chatId, text, { reply_markup: kb });
+}
+
+async function proceedRegisterAndReply(chatId, u) {
+  if (!isExcludedUser(u.id)) {
+    await saveMember(u, "private_start");
+    await setDmReady(u.id);
+  }
+  await sendDmWelcome(chatId);
+}
+
+// Cleanup: if someone is not channel member anymore, remove from sets
+async function ensureChannelMemberOrCleanup(userId) {
+  if (!CHANNEL_CHAT) return true;
+  const ok = await isChannelMember(userId);
+  if (!ok) {
+    await removeMember(userId, "left_channel_or_not_member");
+    return false;
+  }
+  return true;
+}
+
 // ================= Prize parse (expand) =================
 function parsePrizeTextExpand(prizeText) {
   const lines = String(prizeText || "")
@@ -217,9 +243,6 @@ function parsePrizeTextExpand(prizeText) {
 
   const bag = [];
   for (const line of lines) {
-    // accept:
-    // "10000Ks 4time"
-    // "10000Ks 4"
     let m = line.match(/^(.+?)\s+(\d+)\s*time$/i);
     if (!m) m = line.match(/^(.+?)\s+(\d+)$/i);
     if (!m) continue;
@@ -262,14 +285,6 @@ app.get("/health", async (req, res) => {
     const bagLen = await redis.llen(KEY_PRIZE_BAG);
     const lastGroup = await redis.get(KEY_LAST_GROUP);
 
-    const pinMode = (await redis.get(KEY_PIN_MODE)) || "text";
-    const pinHasFile = !!(await redis.get(KEY_PIN_FILE));
-    const pinText = (await redis.get(KEY_PIN_TEXT)) || "";
-
-    const dmMode = (await redis.get(KEY_DM_MODE)) || "text";
-    const dmHasFile = !!(await redis.get(KEY_DM_FILE));
-    const dmText = (await redis.get(KEY_DM_TEXT)) || "";
-
     res.json({
       ok: true,
       group_id_env: GROUP_ID || null,
@@ -278,8 +293,7 @@ app.get("/health", async (req, res) => {
       members: Number(members) || 0,
       winners: Number(winners) || 0,
       remaining_prizes: Number(bagLen) || 0,
-      pin: { mode: pinMode, has_file: pinHasFile, text_len: pinText.length },
-      dm: { mode: dmMode, has_file: dmHasFile, text_len: dmText.length },
+      channel_gate: { enabled: !!CHANNEL_CHAT, chat: CHANNEL_CHAT || null, link: getChannelLink() || null },
       time: new Date().toISOString(),
     });
   } catch (e) {
@@ -294,6 +308,10 @@ app.get("/members", requireApiKey, async (req, res) => {
 
     for (const id of ids || []) {
       if (isExcludedUser(id)) continue;
+
+      // ✅ cleanup if left channel
+      const okChan = await ensureChannelMemberOrCleanup(id);
+      if (!okChan) continue;
 
       const h = await redis.hgetall(KEY_MEMBER_HASH(id));
       if (!h || !h.id) continue;
@@ -328,6 +346,10 @@ app.get("/pool", requireApiKey, async (req, res) => {
 
     for (const id of ids || []) {
       if (isExcludedUser(id)) continue;
+
+      const okChan = await ensureChannelMemberOrCleanup(id);
+      if (!okChan) continue;
+
       const isWinner = await redis.sismember(KEY_WINNERS_SET, String(id));
       if (!isWinner) count++;
     }
@@ -359,11 +381,14 @@ app.post("/config/prizes", requireApiKey, async (req, res) => {
 
 app.post("/spin", requireApiKey, async (req, res) => {
   try {
-    // 1) eligible members (not winners)
     const ids = await redis.smembers(KEY_MEMBERS_SET);
     const eligible = [];
     for (const id of ids || []) {
       if (isExcludedUser(id)) continue;
+
+      const okChan = await ensureChannelMemberOrCleanup(id);
+      if (!okChan) continue;
+
       const isWinner = await redis.sismember(KEY_WINNERS_SET, String(id));
       if (!isWinner) eligible.push(String(id));
     }
@@ -371,7 +396,6 @@ app.post("/spin", requireApiKey, async (req, res) => {
       return res.status(400).json({ ok: false, error: "No members left in pool. Restart Spin to reset winners." });
     }
 
-    // 2) prize bag
     const bagLen = await redis.llen(KEY_PRIZE_BAG);
     if (!bagLen || bagLen <= 0) {
       return res.status(400).json({ ok: false, error: "No prizes left. Set prizes in Settings and Save." });
@@ -380,7 +404,6 @@ app.post("/spin", requireApiKey, async (req, res) => {
     const prize = randPick(bag);
     await redis.lrem(KEY_PRIZE_BAG, 1, String(prize));
 
-    // 3) pick winner
     const winnerId = randPick(eligible);
     const h = await redis.hgetall(KEY_MEMBER_HASH(winnerId));
     const name = (h?.name || "").trim();
@@ -458,13 +481,7 @@ app.post("/restart-spin", requireApiKey, async (req, res) => {
   }
 });
 
-// ================= Telegram Bot (Webhook) =================
-const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
-
-let BOT_USERNAME = null;
-let BOT_ID = null;
-
-// ---- Webhook endpoint ----
+// ================= Telegram Webhook =================
 const WEBHOOK_PATH = `/telegram/${encodeURIComponent(WEBHOOK_SECRET)}`;
 app.post(WEBHOOK_PATH, (req, res) => {
   bot.processUpdate(req.body);
@@ -472,7 +489,6 @@ app.post(WEBHOOK_PATH, (req, res) => {
 });
 
 async function setupWebhook() {
-  // 409 fix: ensure polling is not used + reset webhook
   await bot.deleteWebHook({ drop_pending_updates: true }).catch(() => {});
   await bot.setWebHook(`${PUBLIC_URL}${WEBHOOK_PATH}`);
 }
@@ -480,13 +496,11 @@ async function setupWebhook() {
 // ================= PIN REGISTER (GROUP) =================
 async function buildRegisterKeyboard() {
   const startUrl = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=register` : null;
-  return startUrl
-    ? { inline_keyboard: [[{ text: "▶️ Register / Enable DM", url: startUrl }]] }
-    : undefined;
+  return startUrl ? { inline_keyboard: [[{ text: "▶️ Register / Enable DM", url: startUrl }]] } : undefined;
 }
 
 async function getPinConfig() {
-  const mode = (await redis.get(KEY_PIN_MODE)) || "text"; // "text"|"photo"|"video"
+  const mode = (await redis.get(KEY_PIN_MODE)) || "text";
   const text =
     (await redis.get(KEY_PIN_TEXT)) ||
     "📌 Lucky77 DM Register (Prize Contact)\n\n✅ Prize ပေါက်သွားရင် DM ကနေ ဆက်သွယ်ပေးနိုင်ဖို့\nအောက်က Button ကိုနှိပ်ပြီး Bot DM ကို Enable/Register လုပ်ပါ။";
@@ -501,10 +515,7 @@ async function sendAndPinRegisterMessage(groupId) {
 
   let sent;
   if (mode === "photo" && fileId) {
-    sent = await bot.sendPhoto(gid, fileId, {
-      caption: text,
-      reply_markup: keyboard || undefined,
-    });
+    sent = await bot.sendPhoto(gid, fileId, { caption: text, reply_markup: keyboard || undefined });
   } else if (mode === "video" && fileId) {
     sent = await bot.sendVideo(gid, fileId, {
       caption: text,
@@ -512,9 +523,7 @@ async function sendAndPinRegisterMessage(groupId) {
       supports_streaming: true,
     });
   } else {
-    sent = await bot.sendMessage(gid, text, {
-      reply_markup: keyboard || undefined,
-    });
+    sent = await bot.sendMessage(gid, text, { reply_markup: keyboard || undefined });
   }
 
   try {
@@ -525,34 +534,6 @@ async function sendAndPinRegisterMessage(groupId) {
 
   await redis.set(KEY_PINNED_MSG_ID(String(groupId)), String(sent.message_id));
   return sent.message_id;
-}
-
-async function deleteOldPinnedMessage(groupId) {
-  const gid = String(groupId);
-  const cached = await redis.get(KEY_PINNED_MSG_ID(gid));
-  if (!cached) return { ok: true, removed: false };
-
-  const msgId = Number(cached);
-
-  try {
-    // Try unpin specific; fallback unpin all
-    try {
-      await bot.unpinChatMessage(Number(gid), { message_id: msgId });
-    } catch (_) {
-      try {
-        await bot.unpinAllChatMessages(Number(gid));
-      } catch (_) {}
-    }
-
-    // Delete old pinned message
-    try {
-      await bot.deleteMessage(Number(gid), msgId);
-    } catch (_) {}
-  } finally {
-    await redis.del(KEY_PINNED_MSG_ID(gid));
-  }
-
-  return { ok: true, removed: true };
 }
 
 async function ensurePinnedRegisterMessage(groupId) {
@@ -574,29 +555,51 @@ async function getDmConfig() {
 
 async function sendDmWelcome(chatId) {
   const { mode, text, fileId } = await getDmConfig();
-
-  if (mode === "photo" && fileId) {
-    return bot.sendPhoto(chatId, fileId, { caption: text });
-  }
-  if (mode === "video" && fileId) {
-    return bot.sendVideo(chatId, fileId, { caption: text, supports_streaming: true });
-  }
+  if (mode === "photo" && fileId) return bot.sendPhoto(chatId, fileId, { caption: text });
+  if (mode === "video" && fileId) return bot.sendVideo(chatId, fileId, { caption: text, supports_streaming: true });
   return bot.sendMessage(chatId, text);
 }
+
+// ✅ "Joined (Check Again)" callback
+bot.on("callback_query", async (q) => {
+  try {
+    const data = String(q?.data || "");
+    if (!data.startsWith("chkch:")) return;
+
+    const expectedUserId = data.split(":")[1] || "";
+    const fromId = String(q?.from?.id || "");
+
+    if (fromId !== String(expectedUserId)) {
+      await bot.answerCallbackQuery(q.id, { text: "ဒီခလုတ်က သင့်အတွက်မဟုတ်ပါ။", show_alert: true });
+      return;
+    }
+
+    await bot.answerCallbackQuery(q.id);
+
+    const ok = await isChannelMember(fromId);
+    if (!ok) {
+      await sendJoinGate(q.message.chat.id, fromId);
+      return;
+    }
+
+    await proceedRegisterAndReply(q.message.chat.id, q.from);
+  } catch (_) {
+    try {
+      await bot.answerCallbackQuery(q.id);
+    } catch (_) {}
+  }
+});
 
 // ================= GROUP HANDLERS =================
 bot.on("message", async (msg) => {
   try {
     if (!msg || !msg.chat) return;
 
-    // GROUP
     if (targetGroup(msg.chat)) {
       await redis.set(KEY_LAST_GROUP, String(msg.chat.id));
-
-      // ensure pin exists
       await ensurePinnedRegisterMessage(msg.chat.id);
 
-      // JOIN: delete join service message + silent save new members
+      // JOIN
       if (msg.new_chat_members && msg.new_chat_members.length) {
         await autoDelete(msg.chat.id, msg.message_id, 2000);
 
@@ -610,7 +613,7 @@ bot.on("message", async (msg) => {
         }
       }
 
-      // LEAVE: delete leave message + remove member from lists
+      // LEAVE (group leave cleanup موجود ✅)
       if (msg.left_chat_member) {
         await autoDelete(msg.chat.id, msg.message_id, 2000);
         const u = msg.left_chat_member;
@@ -634,12 +637,16 @@ bot.onText(/^\/start(?:\s+(.+))?/i, async (msg) => {
     const u = msg.from;
     if (!u) return;
 
-    if (!isExcludedUser(u.id)) {
-      await saveMember(u, "private_start");
-      await setDmReady(u.id);
+    // ✅ Channel member-only gate
+    if (CHANNEL_CHAT) {
+      const ok = await isChannelMember(u.id);
+      if (!ok) {
+        await sendJoinGate(msg.chat.id, u.id);
+        return;
+      }
     }
 
-    await sendDmWelcome(msg.chat.id);
+    await proceedRegisterAndReply(msg.chat.id, u);
   } catch (e) {
     console.error("/start error:", e);
   }
@@ -650,16 +657,13 @@ function ownerOnly(msg) {
   return msg && msg.chat && msg.chat.type === "private" && isOwner(msg.from?.id);
 }
 
-// ----- Pin caption/text -----
+// (Owner commands — 그대로 유지)
 bot.onText(/^\/setpin(?:\s+([\s\S]+))?/i, async (msg, match) => {
   try {
     if (!ownerOnly(msg)) return;
 
     const text = match && match[1] ? String(match[1]).trim() : "";
-    if (!text) {
-      await bot.sendMessage(msg.chat.id, "Usage: /setpin your caption/text");
-      return;
-    }
+    if (!text) return bot.sendMessage(msg.chat.id, "Usage: /setpin your caption/text");
 
     await redis.set(KEY_PIN_TEXT, text);
     await bot.sendMessage(msg.chat.id, "✅ Pin caption/text updated.");
@@ -682,7 +686,6 @@ bot.onText(/^\/settext$/i, async (msg) => {
 async function setPinMediaFromMessage(msg, modeWanted) {
   if (!ownerOnly(msg)) return;
 
-  // reply media OR caption media
   const srcMsg = msg.reply_to_message ? msg.reply_to_message : msg;
 
   let fileId = "";
@@ -726,19 +729,12 @@ bot.onText(/^\/setvideo$/i, async (msg) => {
 bot.onText(/^\/status$/i, async (msg) => {
   try {
     if (!ownerOnly(msg)) return;
-    const { mode, text, fileId } = await getPinConfig();
+    const mode = (await redis.get(KEY_PIN_MODE)) || "text";
+    const text = (await redis.get(KEY_PIN_TEXT)) || "";
+    const fileId = (await redis.get(KEY_PIN_FILE)) || "";
     await bot.sendMessage(
       msg.chat.id,
-      "📌 Pin Status\n\n" +
-        `Mode: ${mode}\n` +
-        `Has File: ${fileId ? "YES" : "NO"}\n` +
-        `Text length: ${String(text || "").length}\n\n` +
-        "Commands:\n" +
-        "/setpin <text>\n" +
-        "/setphoto (reply photo)\n" +
-        "/setvideo (reply video)\n" +
-        "/settext\n" +
-        "/update"
+      "📌 Pin Status\n\n" + `Mode: ${mode}\nHas File: ${fileId ? "YES" : "NO"}\nText length: ${text.length}\n\nCommands:\n/setpin <text>\n/setphoto\n/setvideo\n/settext\n/update`
     );
   } catch (e) {
     console.error("/status error:", e);
@@ -748,19 +744,32 @@ bot.onText(/^\/status$/i, async (msg) => {
 bot.onText(/^\/update$/i, async (msg) => {
   try {
     if (!ownerOnly(msg)) return;
+    if (!GROUP_ID) return bot.sendMessage(msg.chat.id, "❌ GROUP_ID မရှိပါ။ Render env မှာ GROUP_ID ထည့်ပါ။");
 
-    if (!GROUP_ID) {
-      await bot.sendMessage(msg.chat.id, "❌ GROUP_ID မရှိပါ။ Render env မှာ GROUP_ID ထည့်ပါ။");
-      return;
-    }
-
-    const gid = String(GROUP_ID);
-
+    const gid = Number(GROUP_ID);
     await bot.sendMessage(msg.chat.id, "⏳ Updating pinned register message...");
 
-    await deleteOldPinnedMessage(gid);
-    await sendAndPinRegisterMessage(gid);
+    // delete old cached pin
+    const cached = await redis.get(KEY_PINNED_MSG_ID(String(gid)));
+    if (cached) {
+      const msgId = Number(cached);
+      try {
+        try {
+          await bot.unpinChatMessage(gid, { message_id: msgId });
+        } catch (_) {
+          try {
+            await bot.unpinAllChatMessages(gid);
+          } catch (_) {}
+        }
+        try {
+          await bot.deleteMessage(gid, msgId);
+        } catch (_) {}
+      } finally {
+        await redis.del(KEY_PINNED_MSG_ID(String(gid)));
+      }
+    }
 
+    await sendAndPinRegisterMessage(gid);
     await bot.sendMessage(msg.chat.id, "✅ Updated! (Old pin removed, new pin sent & pinned)");
   } catch (e) {
     console.error("/update error:", e);
@@ -770,17 +779,11 @@ bot.onText(/^\/update$/i, async (msg) => {
   }
 });
 
-// ----- DM Reply config -----
 bot.onText(/^\/regbotDM(?:\s+([\s\S]+))?/i, async (msg, match) => {
   try {
     if (!ownerOnly(msg)) return;
-
     const text = match && match[1] ? String(match[1]).trim() : "";
-    if (!text) {
-      await bot.sendMessage(msg.chat.id, "Usage: /regbotDM your reply text");
-      return;
-    }
-
+    if (!text) return bot.sendMessage(msg.chat.id, "Usage: /regbotDM your reply text");
     await redis.set(KEY_DM_TEXT, text);
     await bot.sendMessage(msg.chat.id, "✅ DM auto-reply text updated.");
   } catch (e) {
@@ -814,10 +817,7 @@ async function setDmMediaFromMessage(msg, modeWanted) {
   }
 
   if (!fileId) {
-    await bot.sendMessage(
-      msg.chat.id,
-      `❌ No ${modeWanted} found.\n\nHow:\n1) Send ${modeWanted}\n2) Reply that ${modeWanted} with /setbot${modeWanted === "photo" ? "image" : "video"}\n(or send ${modeWanted} with caption /setbot${modeWanted === "photo" ? "image" : "video"})`
-    );
+    await bot.sendMessage(msg.chat.id, `❌ No ${modeWanted} found.`);
     return;
   }
 
@@ -845,19 +845,12 @@ bot.onText(/^\/setbotvideo$/i, async (msg) => {
 bot.onText(/^\/dmstatus$/i, async (msg) => {
   try {
     if (!ownerOnly(msg)) return;
-    const { mode, text, fileId } = await getDmConfig();
+    const mode = (await redis.get(KEY_DM_MODE)) || "text";
+    const text = (await redis.get(KEY_DM_TEXT)) || "";
+    const fileId = (await redis.get(KEY_DM_FILE)) || "";
     await bot.sendMessage(
       msg.chat.id,
-      "📩 DM Reply Status\n\n" +
-        `Mode: ${mode}\n` +
-        `Has File: ${fileId ? "YES" : "NO"}\n` +
-        `Text length: ${String(text || "").length}\n\n` +
-        "Commands:\n" +
-        "/regbotDM <text>\n" +
-        "/setbotimage (reply photo)\n" +
-        "/setbotvideo (reply video)\n" +
-        "/setbottext\n" +
-        "/dmstatus"
+      "📩 DM Reply Status\n\n" + `Mode: ${mode}\nHas File: ${fileId ? "YES" : "NO"}\nText length: ${text.length}\n`
     );
   } catch (e) {
     console.error("/dmstatus error:", e);
@@ -871,28 +864,17 @@ async function boot() {
   BOT_USERNAME = me.username ? String(me.username) : null;
   console.log("Bot Ready:", { BOT_ID, BOT_USERNAME });
 
-  // default pin config (only if not set yet)
-  const hasPinMode = await redis.get(KEY_PIN_MODE);
-  if (!hasPinMode) await redis.set(KEY_PIN_MODE, "text");
-
-  const hasPinText = await redis.get(KEY_PIN_TEXT);
-  if (!hasPinText) {
+  // defaults
+  if (!(await redis.get(KEY_PIN_MODE))) await redis.set(KEY_PIN_MODE, "text");
+  if (!(await redis.get(KEY_PIN_TEXT))) {
     await redis.set(
       KEY_PIN_TEXT,
       "📌 Lucky77 DM Register (Prize Contact)\n\n✅ Prize ပေါက်သွားရင် DM ကနေ ဆက်သွယ်ပေးနိုင်ဖို့\nအောက်က Button ကိုနှိပ်ပြီး Bot DM ကို Enable/Register လုပ်ပါ။"
     );
   }
-
-  // default DM reply config
-  const hasDmMode = await redis.get(KEY_DM_MODE);
-  if (!hasDmMode) await redis.set(KEY_DM_MODE, "text");
-
-  const hasDmText = await redis.get(KEY_DM_TEXT);
-  if (!hasDmText) {
-    await redis.set(
-      KEY_DM_TEXT,
-      "✅ Registered ပြီးပါပြီ。\n\n📩 Prize ပေါက်ရင် ဒီ DM ကနေ ဆက်သွယ်ပေးပါမယ်။"
-    );
+  if (!(await redis.get(KEY_DM_MODE))) await redis.set(KEY_DM_MODE, "text");
+  if (!(await redis.get(KEY_DM_TEXT))) {
+    await redis.set(KEY_DM_TEXT, "✅ Registered ပြီးပါပြီ。\n\n📩 Prize ပေါက်ရင် ဒီ DM ကနေ ဆက်သွယ်ပေးပါမယ်။");
   }
 
   await setupWebhook();
