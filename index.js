@@ -594,45 +594,35 @@ app.post("/notice", requireApiKey, async (req, res) => {
 // restart spin: clear winners+history, rebuild pool from members(active=1) and rebuild bag from saved source
 app.post("/restart-spin", requireApiKey, async (req, res) => {
   try {
-    // 1) clear winners + history
     await redis.del(KEY_WINNERS_SET);
     await redis.del(KEY_HISTORY_LIST);
 
-    // 2) rebuild pool from members that are active=1
+    // rebuild pool from members that are active=1
     await redis.del(KEY_POOL_SET);
-
     const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
     const cleanIds = ids.map(String).filter((id) => !isExcludedUser(id));
 
-    // ✅ FAST: pipeline only HGET active (not HGETALL)
-    const pipe = redis.pipeline();
-    for (const id of cleanIds) {
-      pipe.hget(KEY_MEMBER_HASH(id), "active");
-    }
-    const activeRes = await pipe.exec();
+    const hashes = await Promise.all(
+      cleanIds.map((id) => redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null))
+    );
 
-    const poolPipe = redis.pipeline();
     for (let i = 0; i < cleanIds.length; i++) {
-      const id = cleanIds[i];
-      const activeVal = activeRes?.[i]?.result; // "1" | "0" | null
-      const active = String(activeVal ?? "1") === "1"; // default active if missing
-      if (active) poolPipe.sadd(KEY_POOL_SET, String(id));
+      const id = String(cleanIds[i]);
+      const h = hashes[i];
+      const active = String(h?.active ?? "1") === "1";
+      if (!active) continue;
+      await redis.sadd(KEY_POOL_SET, id);
     }
-    await poolPipe.exec();
 
-    // 3) rebuild prize bag from last saved source (pipeline)
+    // rebuild prize bag from last saved source
     const raw = await redis.get(KEY_PRIZE_SOURCE);
     if (raw) {
       const bag = parsePrizeTextExpand(raw);
-
       await redis.del(KEY_PRIZE_BAG);
-
-      const bagPipe = redis.pipeline();
-      for (const p of bag) bagPipe.rpush(KEY_PRIZE_BAG, String(p));
-      await bagPipe.exec();
+      for (const p of bag) await redis.rpush(KEY_PRIZE_BAG, String(p));
     }
 
-    res.json({ ok: true, pool_rebuilt: true });
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
@@ -902,3 +892,4 @@ app.listen(PORT, "0.0.0.0", async () => {
   } catch (e) {
     console.error("Boot error:", e);
   }
+});
