@@ -15,14 +15,14 @@ const {
   OWNER_ID,
   API_KEY,
 
-  GROUP_ID,        // optional (supergroup id)
-  EXCLUDE_IDS,     // optional "123,456"
+  GROUP_ID,
+  EXCLUDE_IDS,
 
   PUBLIC_URL,
   WEBHOOK_SECRET,
 
-  CHANNEL_CHAT,    // optional "@channel"
-  CHANNEL_LINK,    // optional "https://t.me/channel"
+  CHANNEL_CHAT,
+  CHANNEL_LINK,
 } = process.env;
 
 function must(v, name) {
@@ -34,13 +34,13 @@ function must(v, name) {
 
 must(BOT_TOKEN, "BOT_TOKEN");
 must(UPSTASH_REDIS_REST_URL, "UPSTASH_REDIS_REST_URL");
-must(UPSTASH_REDIS_REST_TOKEN, "UPSTASH_REDIS_REST_TOKEN"); // ✅ fixed name
+must(UPSTASH_REDIS_REST_TOKEN, "UPSTASH_REDIS_REST_TOKEN");
 must(OWNER_ID, "OWNER_ID");
 must(API_KEY, "API_KEY");
 must(PUBLIC_URL, "PUBLIC_URL");
 must(WEBHOOK_SECRET, "WEBHOOK_SECRET");
 
-if (!GROUP_ID) console.warn("⚠️ GROUP_ID not set (pin needs it only to restrict target).");
+if (!GROUP_ID) console.warn("⚠️ GROUP_ID not set (pin restrict target only).");
 if (!CHANNEL_CHAT && !CHANNEL_LINK) console.warn("⚠️ CHANNEL_CHAT/LINK not set (channel gate disabled).");
 
 /* ================= Redis ================= */
@@ -58,16 +58,13 @@ const KEY_MEMBER_HASH = (id) => `${KEY_PREFIX}:member:${id}`;
 const KEY_WINNERS_SET = `${KEY_PREFIX}:winners:set`;
 const KEY_HISTORY_LIST = `${KEY_PREFIX}:history:list`;
 
-// ✅ pool set for speed
 const KEY_POOL_SET = `${KEY_PREFIX}:pool:set`;
 
-// prizes
 const KEY_PRIZE_BAG = `${KEY_PREFIX}:prizes:bag`;
 const KEY_PRIZE_SOURCE = `${KEY_PREFIX}:prizes:source`;
 
 const KEY_LAST_GROUP = `${KEY_PREFIX}:last_group_id`;
 
-// pinned register message
 const KEY_PINNED_MSG_ID = (gid) => `${KEY_PREFIX}:pinned:${gid}`;
 const KEY_PIN_TEXT = `${KEY_PREFIX}:pin:text`;
 const KEY_PIN_MODE = `${KEY_PREFIX}:pin:mode`;
@@ -79,16 +76,30 @@ const KEY_JOIN_BTN = `${KEY_PREFIX}:join:btn`;
 
 // reg dm (live)
 const KEY_REG_CAP = `${KEY_PREFIX}:reg:cap`;
-const KEY_REG_BTN = `${KEY_PREFIX}:reg:btn`;
+const KEY_REG_BTN = `${KEY_PREFIX}:reg:btn`; // also used for pinned button label
 const KEY_REG_MODE = `${KEY_PREFIX}:reg:mode`;
 const KEY_REG_FILE = `${KEY_PREFIX}:reg:file`;
 
-// notice ctx (forward winner replies)
+// notice ctx
 const KEY_NOTICE_CTX = (uid) => `${KEY_PREFIX}:notice:ctx:${uid}`;
 
-// indexes (for /remove by name/username)
+// indexes
 const KEY_USER_INDEX = (u) => `${KEY_PREFIX}:index:username:${u}`;
 const KEY_NAME_INDEX = (n) => `${KEY_PREFIX}:index:name:${n}`;
+
+// ===== STAGING (owner sets -> /upload applies) =====
+const KEY_STG_JOIN_CAP = `${KEY_PREFIX}:stg:join:cap`;
+const KEY_STG_JOIN_BTN = `${KEY_PREFIX}:stg:join:btn`;
+
+const KEY_STG_REG_CAP = `${KEY_PREFIX}:stg:reg:cap`;
+const KEY_STG_REG_BTN = `${KEY_PREFIX}:stg:reg:btn`;
+const KEY_STG_REG_MODE = `${KEY_PREFIX}:stg:reg:mode`;
+const KEY_STG_REG_FILE = `${KEY_PREFIX}:stg:reg:file`;
+
+const KEY_STG_POST_CAP = `${KEY_PREFIX}:stg:post:cap`;
+const KEY_STG_POST_BTN = `${KEY_PREFIX}:stg:post:btn`;
+const KEY_STG_POST_MODE = `${KEY_PREFIX}:stg:post:mode`;
+const KEY_STG_POST_FILE = `${KEY_PREFIX}:stg:post:file`;
 
 /* ================= Telegram Bot (Webhook) ================= */
 const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
@@ -141,7 +152,26 @@ async function autoDelete(chatId, messageId, ms = 2000) {
 function nowISO() {
   return new Date().toISOString();
 }
-
+function extractCmdText(text, cmd) {
+  return String(text || "")
+    .replace(new RegExp(`^\\/${cmd}(@\\w+)?\\s*`, "i"), "")
+    .trim();
+}
+async function getStartUrl() {
+  if (!BOT_USERNAME) {
+    try {
+      const me = await bot.getMe();
+      BOT_USERNAME = me.username ? String(me.username) : null;
+    } catch (_) {}
+  }
+  return BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=register` : "";
+}
+async function buildStartKeyboard(label) {
+  const startUrl = await getStartUrl();
+  if (!startUrl) return undefined;
+  const txt = String(label || "").trim() || "▶️ Register / Enable DM";
+  return { inline_keyboard: [[{ text: txt, url: startUrl }]] };
+}
 /* ================= Channel Gate ================= */
 function getChannelLink() {
   if (CHANNEL_LINK) return String(CHANNEL_LINK);
@@ -209,16 +239,6 @@ async function indexMemberIdentity({ id, name, username }) {
   if (n) await redis.set(KEY_NAME_INDEX(n), String(id));
 }
 
-async function isRegistered(userId) {
-  const ok = await redis.sismember(KEY_MEMBERS_SET, String(userId));
-  return !!ok;
-}
-
-// ✅ core rule:
-// - join / register => active=1, left_at cleared
-// - leave group => active=0, remove from pool
-// - owner /remove => hard delete from members+pool+winners+hash (+ index cleanup)
-// - rejoin => saveMember() runs => active=1 and re-add (if not winner)
 async function saveMember(u, source = "group_join") {
   const userId = String(u.id);
   if (isExcludedUser(userId)) return { ok: false, reason: "excluded" };
@@ -228,18 +248,14 @@ async function saveMember(u, source = "group_join") {
   const display = String(name || "").trim() || (cleanUsername ? `@${cleanUsername}` : userId);
 
   const prev = await redis.hgetall(KEY_MEMBER_HASH(userId)).catch(() => ({}));
-  const prevDmReady = String(prev?.dm_ready || "0");       // preserve
-  const prevRegAt = String(prev?.registered_at || "");     // preserve first reg time if exists
+  const prevDmReady = String(prev?.dm_ready || "0");
+  const prevRegAt = String(prev?.registered_at || "");
 
   await redis.sadd(KEY_MEMBERS_SET, userId);
 
-  // winner?
   const isWinner = await redis.sismember(KEY_WINNERS_SET, userId);
-  if (!isWinner) {
-    await redis.sadd(KEY_POOL_SET, userId); // eligible pool
-  } else {
-    await redis.srem(KEY_POOL_SET, userId);
-  }
+  if (!isWinner) await redis.sadd(KEY_POOL_SET, userId);
+  else await redis.srem(KEY_POOL_SET, userId);
 
   await redis.hset(KEY_MEMBER_HASH(userId), {
     id: userId,
@@ -248,6 +264,7 @@ async function saveMember(u, source = "group_join") {
     display,
 
     dm_ready: prevDmReady === "1" ? "1" : "0",
+    dm_ready_at: String(prev?.dm_ready_at || ""),
 
     active: "1",
     left_at: "",
@@ -256,7 +273,6 @@ async function saveMember(u, source = "group_join") {
     source: String(source),
     registered_at: prevRegAt || nowISO(),
     last_seen_at: nowISO(),
-    dm_ready_at: String(prev?.dm_ready_at || ""),
   });
 
   await indexMemberIdentity({ id: userId, name, username: cleanUsername });
@@ -274,22 +290,17 @@ async function markInactive(userId, reason = "left_group") {
   const uid = String(userId);
   if (isExcludedUser(uid)) return { ok: false, reason: "excluded" };
 
-  // keep in members list, just mark inactive
   await redis.sadd(KEY_MEMBERS_SET, uid);
   await redis.hset(KEY_MEMBER_HASH(uid), {
     active: "0",
     left_at: nowISO(),
     left_reason: String(reason),
   });
-
-  // IMPORTANT: inactive must not be in pool
   await redis.srem(KEY_POOL_SET, uid);
-
   return { ok: true };
 }
 
-// owner hard remove (fully delete)
-async function removeMemberHard(userId, reason = "owner_remove") {
+async function removeMemberHard(userId) {
   const uid = String(userId);
 
   const h = await redis.hgetall(KEY_MEMBER_HASH(uid)).catch(() => ({}));
@@ -304,206 +315,8 @@ async function removeMemberHard(userId, reason = "owner_remove") {
   if (u) await redis.del(KEY_USER_INDEX(u));
   if (n) await redis.del(KEY_NAME_INDEX(n));
 
-  return { ok: true, reason };
-}
-
-/* ================= OWNER /remove resolve ================= */
-function parseRemovePayload(text) {
-  const raw = String(text || "").replace(/^\/remove(@\w+)?\s*/i, "").trim();
-  if (!raw) return null;
-
-  const parts = raw.split(/\s+/).filter(Boolean);
-
-  let username = "";
-  let id = "";
-  const nameTokens = [];
-
-  for (const p of parts) {
-    const low = p.toLowerCase();
-    if (p.startsWith("@") && p.length > 1) {
-      username = p.replace("@", "").trim();
-      continue;
-    }
-    const m = low.match(/^id[:=](\d+)$/);
-    if (m) {
-      id = m[1];
-      continue;
-    }
-    // if user typed pure digits => id
-    if (!id && /^\d+$/.test(p)) {
-      id = p;
-      continue;
-    }
-    nameTokens.push(p);
-  }
-
-  const name = nameTokens.join(" ").trim();
-  if (!name && !username && !id) return null;
-  return { name, username, id };
-}
-
-async function resolveMemberIdForRemove({ id, username, name }) {
-  if (id) return String(id);
-
-  const u = normalizeUsername(username);
-  if (u) {
-    const mapped = await redis.get(KEY_USER_INDEX(u));
-    if (mapped) return String(mapped);
-
-    // fallback: search by scanning hashes if index missing
-    const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
-    for (const mid of ids) {
-      const h = await redis.hgetall(KEY_MEMBER_HASH(mid)).catch(() => null);
-      if (!h) continue;
-      const hu = normalizeUsername(h.username || "");
-      if (hu && hu === u) return String(h.id || mid);
-    }
-  }
-
-  const n = normalizeName(name);
-  if (n) {
-    const mapped = await redis.get(KEY_NAME_INDEX(n));
-    if (mapped) return String(mapped);
-
-    // fallback scan
-    const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
-    for (const mid of ids) {
-      const h = await redis.hgetall(KEY_MEMBER_HASH(mid)).catch(() => null);
-      if (!h) continue;
-      const hn = normalizeName(h.name || "");
-      if (hn && hn === n) return String(h.id || mid);
-      // also match display if they stored name inside display
-      const hd = normalizeName(h.display || "");
-      if (hd && hd === n) return String(h.id || mid);
-    }
-  }
-
-  return "";
-}
-
-/* ================= OWNER /add =================
-   ✅ Owner DM ထဲမှာ: id + name + @username (အားလုံးတစ်ခါတည်း add)
-   Rule:
-   - already exists by id OR @username OR name => မထပ်ပေါင်း (original မပြင်)
-   - new add များမှာ id မဖြစ်မနေလို (storage key)
-   - /add နဲ့ add လုပ်တာနဲ့ dm_ready=1 တခါတည်း set
-   Examples:
-     /add 123456789 @mgmg Mg Mg
-     /add id:123456789 Mg Mg @mgmg
-     /add 123456789 Mg Mg
-*/
-function parseAddPayload(text) {
-  const raw = String(text || "").replace(/^\/add(@\w+)?\s*/i, "").trim();
-  if (!raw) return null;
-
-  const parts = raw.split(/\s+/).filter(Boolean);
-
-  let username = "";
-  let id = "";
-  const nameTokens = [];
-
-  for (const p of parts) {
-    const low = p.toLowerCase();
-    if (p.startsWith("@") && p.length > 1) {
-      username = p.replace("@", "").trim();
-      continue;
-    }
-    const m = low.match(/^id[:=](\d+)$/);
-    if (m) {
-      id = m[1];
-      continue;
-    }
-    if (!id && /^\d+$/.test(p)) {
-      id = p;
-      continue;
-    }
-    nameTokens.push(p);
-  }
-
-  const name = nameTokens.join(" ").trim();
-  if (!name && !username && !id) return null;
-  return { name, username, id };
-}
-
-async function resolveMemberIdForAny({ id, username, name }) {
-  if (id) return String(id);
-
-  const u = normalizeUsername(username);
-  if (u) {
-    const mapped = await redis.get(KEY_USER_INDEX(u));
-    if (mapped) return String(mapped);
-
-    // fallback scan
-    const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
-    for (const mid of ids) {
-      const h = await redis.hgetall(KEY_MEMBER_HASH(mid)).catch(() => null);
-      if (!h) continue;
-      const hu = normalizeUsername(h.username || "");
-      if (hu && hu === u) return String(h.id || mid);
-    }
-  }
-
-  const n = normalizeName(name);
-  if (n) {
-    const mapped = await redis.get(KEY_NAME_INDEX(n));
-    if (mapped) return String(mapped);
-
-    // fallback scan
-    const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
-    for (const mid of ids) {
-      const h = await redis.hgetall(KEY_MEMBER_HASH(mid)).catch(() => null);
-      if (!h) continue;
-      const hn = normalizeName(h.name || "");
-      if (hn && hn === n) return String(h.id || mid);
-      const hd = normalizeName(h.display || "");
-      if (hd && hd === n) return String(h.id || mid);
-    }
-  }
-
-  return "";
-}
-
-async function addMemberManual({ id, name = "", username = "" }, source = "owner_add") {
-  const uid = String(id || "").trim();
-  if (!uid || !/^\d+$/.test(uid)) return { ok: false, error: "invalid_id" };
-  if (isExcludedUser(uid)) return { ok: false, error: "excluded" };
-
-  const exists = await redis.sismember(KEY_MEMBERS_SET, uid);
-  if (exists) return { ok: false, error: "exists" }; // do not edit original
-
-  const cleanUsername = String(username || "").replace("@", "").trim();
-  const cleanName = String(name || "").trim();
-  const display = cleanName || (cleanUsername ? `@${cleanUsername}` : uid);
-
-  await redis.sadd(KEY_MEMBERS_SET, uid);
-
-  // if not winner => add to pool
-  const isWinner = await redis.sismember(KEY_WINNERS_SET, uid);
-  if (!isWinner) await redis.sadd(KEY_POOL_SET, uid);
-
-  await redis.hset(KEY_MEMBER_HASH(uid), {
-    id: uid,
-    name: cleanName,
-    username: cleanUsername,
-    display,
-
-    // ✅ /add from owner DM => dm_ready=1
-    dm_ready: "1",
-    dm_ready_at: nowISO(),
-
-    active: "1",
-    left_at: "",
-    left_reason: "",
-
-    source: String(source),
-    registered_at: nowISO(),
-    last_seen_at: nowISO(),
-  });
-
-  await indexMemberIdentity({ id: uid, name: cleanName, username: cleanUsername });
   return { ok: true };
 }
-
 /* ================= Auth ================= */
 function requireApiKey(req, res, next) {
   const k = req.headers["x-api-key"] || req.query.key;
@@ -547,14 +360,12 @@ app.get("/health", async (req, res) => {
 app.get("/members", requireApiKey, async (req, res) => {
   try {
     const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
-    const cleanIds = ids.map(String).filter((id) => !isExcludedUser(id));
+    const cleanIds = ids.map(String).filter((id) => id && !isExcludedUser(id));
 
     const winnersArr = (await redis.smembers(KEY_WINNERS_SET)) || [];
     const winnersSet = new Set(winnersArr.map(String));
 
-    const hashes = await Promise.all(
-      cleanIds.map((id) => redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null))
-    );
+    const hashes = await Promise.all(cleanIds.map((id) => redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null)));
 
     const members = [];
     for (let i = 0; i < cleanIds.length; i++) {
@@ -563,10 +374,7 @@ app.get("/members", requireApiKey, async (req, res) => {
 
       const name = String(h?.name || "").trim();
       const username = String(h?.username || "").trim().replace("@", "");
-      const display =
-        String(h?.display || "").trim() ||
-        (name || (username ? `@${username}` : id));
-
+      const display = String(h?.display || "").trim() || (name || (username ? `@${username}` : id));
       const active = String(h?.active ?? "1") === "1";
 
       members.push({
@@ -604,9 +412,7 @@ app.post("/config/prizes", requireApiKey, async (req, res) => {
     const { prizeText } = req.body || {};
     const bag = parsePrizeTextExpand(prizeText);
 
-    if (!bag.length) {
-      return res.status(400).json({ ok: false, error: "No valid prizes. Example: 10000Ks 4time" });
-    }
+    if (!bag.length) return res.status(400).json({ ok: false, error: "No valid prizes. Example: 10000Ks 4time" });
 
     await redis.del(KEY_PRIZE_BAG);
     for (const p of bag) await redis.rpush(KEY_PRIZE_BAG, String(p));
@@ -621,20 +427,15 @@ app.post("/config/prizes", requireApiKey, async (req, res) => {
 app.post("/spin", requireApiKey, async (req, res) => {
   try {
     const winnerId = await redis.srandmember(KEY_POOL_SET);
-    if (!winnerId) {
-      return res.status(400).json({ ok: false, error: "No members left in pool. Restart Spin." });
-    }
+    if (!winnerId) return res.status(400).json({ ok: false, error: "No members left in pool. Restart Spin." });
 
     const bagLen = await redis.llen(KEY_PRIZE_BAG);
-    if (!bagLen || bagLen <= 0) {
-      return res.status(400).json({ ok: false, error: "No prizes left. Save prizes again." });
-    }
+    if (!bagLen || bagLen <= 0) return res.status(400).json({ ok: false, error: "No prizes left. Save prizes again." });
 
     const bag = await redis.lrange(KEY_PRIZE_BAG, 0, bagLen - 1);
     const prize = randPick(bag);
     await redis.lrem(KEY_PRIZE_BAG, 1, String(prize));
 
-    // winner -> move pool->winners
     await redis.srem(KEY_POOL_SET, String(winnerId));
     await redis.sadd(KEY_WINNERS_SET, String(winnerId));
 
@@ -646,13 +447,7 @@ app.post("/spin", requireApiKey, async (req, res) => {
     const item = {
       at: nowISO(),
       prize: String(prize),
-      winner: {
-        id: String(winnerId),
-        name,
-        username,
-        display,
-        dm_ready: String(h?.dm_ready || "0") === "1",
-      },
+      winner: { id: String(winnerId), name, username, display, dm_ready: String(h?.dm_ready || "0") === "1" },
     };
 
     await redis.lpush(KEY_HISTORY_LIST, JSON.stringify(item));
@@ -668,11 +463,7 @@ app.get("/history", requireApiKey, async (req, res) => {
   try {
     const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
     const history = (list || []).map((s) => {
-      try {
-        return JSON.parse(s);
-      } catch {
-        return { raw: s };
-      }
+      try { return JSON.parse(s); } catch { return { raw: s }; }
     });
     res.json({ ok: true, total: history.length, history });
   } catch (e) {
@@ -691,17 +482,11 @@ app.post("/notice", requireApiKey, async (req, res) => {
     const msgText =
       text && String(text).trim()
         ? String(text)
-        : (
-            "Congratulation 🥳🥳🥳ပါအကိုရှင့်\n" +
-            `လက်ကီး77 ရဲ့ လစဉ်ဗလာမပါလက်ကီးဝှီး အစီစဉ်မှာ ယူနစ် ${pz || "—"} ကံထူးသွားပါတယ်ရှင့်☘️\n` +
-            "ဂိမ်းယူနစ်လေး ထည့်ပေးဖို့ အကို့ဂိမ်းအကောင့်လေး ပို့ပေးပါရှင့်"
-          );
+        : "Congratulation 🥳🥳🥳ပါအကိုရှင့်\n" +
+          `လက်ကီး77 ရဲ့ လစဉ်ဗလာမပါလက်ကီးဝှီး အစီစဉ်မှာ ယူနစ် ${pz || "—"} ကံထူးသွားပါတယ်ရှင့်☘️\n` +
+          "ဂိမ်းယူနစ်လေး ထည့်ပေးဖို့ အကို့ဂိမ်းအကောင့်လေး ပို့ပေးပါရှင့်";
 
-    await redis.set(
-      KEY_NOTICE_CTX(uid),
-      JSON.stringify({ prize: pz, at: nowISO() }),
-      { ex: 60 * 60 * 24 * 7 }
-    );
+    await redis.set(KEY_NOTICE_CTX(uid), JSON.stringify({ prize: pz, at: nowISO() }), { ex: 60 * 60 * 24 * 7 });
 
     const dm = await bot
       .sendMessage(Number(uid), msgText)
@@ -714,69 +499,32 @@ app.post("/notice", requireApiKey, async (req, res) => {
   }
 });
 
-// ✅ restart spin: robust rebuild (pool + prize bag)
 app.post("/restart-spin", requireApiKey, async (req, res) => {
   try {
-    // 1) clear winners + history
     await redis.del(KEY_WINNERS_SET);
     await redis.del(KEY_HISTORY_LIST);
 
-    // 2) rebuild pool from active members (default active=1 if missing hash)
     await redis.del(KEY_POOL_SET);
 
     const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
     const cleanIds = ids.map(String).filter((id) => id && !isExcludedUser(id));
 
-    let poolAdded = 0;
-    let inactiveSkipped = 0;
-    let missingHash = 0;
-
     for (const id of cleanIds) {
       const h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
-      if (!h) {
-        missingHash++;
-        // if no hash, treat as active
-        await redis.sadd(KEY_POOL_SET, String(id));
-        poolAdded++;
-        continue;
-      }
-      const active = String(h?.active ?? "1") === "1";
-      if (!active) {
-        inactiveSkipped++;
-        continue;
-      }
-      await redis.sadd(KEY_POOL_SET, String(id));
-      poolAdded++;
+      const active = !h ? true : String(h?.active ?? "1") === "1";
+      if (active) await redis.sadd(KEY_POOL_SET, String(id));
     }
 
-    // 3) rebuild prize bag from last saved source
     const raw = await redis.get(KEY_PRIZE_SOURCE);
-    let prizesTotal = 0;
-    let prizesRebuilt = false;
-
     if (raw && String(raw).trim()) {
       const bag = parsePrizeTextExpand(raw);
       await redis.del(KEY_PRIZE_BAG);
       for (const p of bag) await redis.rpush(KEY_PRIZE_BAG, String(p));
-      prizesTotal = bag.length;
-      prizesRebuilt = true;
     } else {
-      // no saved source => just clear bag
       await redis.del(KEY_PRIZE_BAG);
-      prizesTotal = 0;
-      prizesRebuilt = false;
     }
 
-    res.json({
-      ok: true,
-      pool_added: poolAdded,
-      members_total: cleanIds.length,
-      inactive_skipped: inactiveSkipped,
-      missing_hash: missingHash,
-      prizes_rebuilt: prizesRebuilt,
-      prizes_total: prizesTotal,
-      time: nowISO(),
-    });
+    res.json({ ok: true, pool: Number(await redis.scard(KEY_POOL_SET)) || 0, time: nowISO() });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
@@ -788,7 +536,6 @@ app.post(WEBHOOK_PATH, (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
-
 async function setupWebhook() {
   await bot.deleteWebHook({ drop_pending_updates: true }).catch(() => {});
   await bot.setWebHook(`${PUBLIC_URL}${WEBHOOK_PATH}`);
@@ -796,10 +543,13 @@ async function setupWebhook() {
 
 /* ================= Pinned register message ================= */
 async function buildRegisterKeyboard() {
-  const startUrl = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=register` : null;
-  return startUrl
-    ? { inline_keyboard: [[{ text: "▶️ Register / Enable DM", url: startUrl }]] }
-    : undefined;
+  const startUrl = await getStartUrl();
+  if (!startUrl) return undefined;
+
+  const liveBtn = (await redis.get(KEY_REG_BTN)) || "";
+  const label = String(liveBtn).trim() || "▶️ Register / Enable DM";
+
+  return { inline_keyboard: [[{ text: label, url: startUrl }]] };
 }
 
 async function getPinConfig() {
@@ -820,19 +570,12 @@ async function sendAndPinRegisterMessage(groupId) {
   if (mode === "photo" && fileId) {
     sent = await bot.sendPhoto(gid, fileId, { caption: text, reply_markup: keyboard || undefined });
   } else if (mode === "video" && fileId) {
-    sent = await bot.sendVideo(gid, fileId, {
-      caption: text,
-      reply_markup: keyboard || undefined,
-      supports_streaming: true,
-    });
+    sent = await bot.sendVideo(gid, fileId, { caption: text, reply_markup: keyboard || undefined, supports_streaming: true });
   } else {
     sent = await bot.sendMessage(gid, text, { reply_markup: keyboard || undefined });
   }
 
-  try {
-    await bot.pinChatMessage(gid, sent.message_id, { disable_notification: true });
-  } catch (_) {}
-
+  try { await bot.pinChatMessage(gid, sent.message_id, { disable_notification: true }); } catch (_) {}
   await redis.set(KEY_PINNED_MSG_ID(String(groupId)), String(sent.message_id));
   return sent.message_id;
 }
@@ -854,88 +597,321 @@ async function getRegLive() {
   const btn = (await redis.get(KEY_REG_BTN)) || "";
   return { mode: String(mode), cap: String(cap), fileId: String(fileId), btn: String(btn) };
 }
-
 async function sendRegWelcome(chatId) {
   const { mode, cap, fileId } = await getRegLive();
   if (mode === "photo" && fileId) return bot.sendPhoto(chatId, fileId, { caption: cap });
   if (mode === "video" && fileId) return bot.sendVideo(chatId, fileId, { caption: cap, supports_streaming: true });
   return bot.sendMessage(chatId, cap);
 }
-
 async function proceedRegisterAndReply(chatId, u) {
-  // channel gate check is done outside (start/callback)
   await saveMember(u, "private_start");
   await setDmReady(u.id);
   await sendRegWelcome(chatId);
 }
+/* ================= OWNER /remove & /add ================= */
+function parseRemovePayload(text) {
+  const raw = String(text || "").replace(/^\/remove(@\w+)?\s*/i, "").trim();
+  if (!raw) return null;
 
-/* ================= OWNER COMMAND: /remove ================= */
+  const parts = raw.split(/\s+/).filter(Boolean);
+  let username = "";
+  let id = "";
+  const nameTokens = [];
+
+  for (const p of parts) {
+    const low = p.toLowerCase();
+    if (p.startsWith("@") && p.length > 1) { username = p.replace("@", "").trim(); continue; }
+    const m = low.match(/^id[:=](\d+)$/);
+    if (m) { id = m[1]; continue; }
+    if (!id && /^\d+$/.test(p)) { id = p; continue; }
+    nameTokens.push(p);
+  }
+
+  const name = nameTokens.join(" ").trim();
+  if (!name && !username && !id) return null;
+  return { name, username, id };
+}
+
+async function resolveMemberIdForAny({ id, username, name }) {
+  if (id) return String(id);
+
+  const u = normalizeUsername(username);
+  if (u) {
+    const mapped = await redis.get(KEY_USER_INDEX(u));
+    if (mapped) return String(mapped);
+
+    const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
+    for (const mid of ids) {
+      const h = await redis.hgetall(KEY_MEMBER_HASH(mid)).catch(() => null);
+      if (!h) continue;
+      if (normalizeUsername(h.username || "") === u) return String(h.id || mid);
+    }
+  }
+
+  const n = normalizeName(name);
+  if (n) {
+    const mapped = await redis.get(KEY_NAME_INDEX(n));
+    if (mapped) return String(mapped);
+
+    const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
+    for (const mid of ids) {
+      const h = await redis.hgetall(KEY_MEMBER_HASH(mid)).catch(() => null);
+      if (!h) continue;
+      if (normalizeName(h.name || "") === n) return String(h.id || mid);
+      if (normalizeName(h.display || "") === n) return String(h.id || mid);
+    }
+  }
+  return "";
+}
+
+function parseAddPayload(text) {
+  const raw = String(text || "").replace(/^\/add(@\w+)?\s*/i, "").trim();
+  if (!raw) return null;
+
+  const parts = raw.split(/\s+/).filter(Boolean);
+  let username = "";
+  let id = "";
+  const nameTokens = [];
+
+  for (const p of parts) {
+    const low = p.toLowerCase();
+    if (p.startsWith("@") && p.length > 1) { username = p.replace("@", "").trim(); continue; }
+    const m = low.match(/^id[:=](\d+)$/);
+    if (m) { id = m[1]; continue; }
+    if (!id && /^\d+$/.test(p)) { id = p; continue; }
+    nameTokens.push(p);
+  }
+
+  const name = nameTokens.join(" ").trim();
+  if (!name && !username && !id) return null;
+  return { name, username, id };
+}
+
+async function addMemberManual({ id, name = "", username = "" }, source = "owner_add") {
+  const uid = String(id || "").trim();
+  if (!uid || !/^\d+$/.test(uid)) return { ok: false, error: "invalid_id" };
+  if (isExcludedUser(uid)) return { ok: false, error: "excluded" };
+
+  const exists = await redis.sismember(KEY_MEMBERS_SET, uid);
+  if (exists) return { ok: false, error: "exists" };
+
+  const cleanUsername = String(username || "").replace("@", "").trim();
+  const cleanName = String(name || "").trim();
+  const display = cleanName || (cleanUsername ? `@${cleanUsername}` : uid);
+
+  await redis.sadd(KEY_MEMBERS_SET, uid);
+
+  const isWinner = await redis.sismember(KEY_WINNERS_SET, uid);
+  if (!isWinner) await redis.sadd(KEY_POOL_SET, uid);
+
+  await redis.hset(KEY_MEMBER_HASH(uid), {
+    id: uid,
+    name: cleanName,
+    username: cleanUsername,
+    display,
+    dm_ready: "1",
+    dm_ready_at: nowISO(),
+    active: "1",
+    left_at: "",
+    left_reason: "",
+    source: String(source),
+    registered_at: nowISO(),
+    last_seen_at: nowISO(),
+  });
+
+  await indexMemberIdentity({ id: uid, name: cleanName, username: cleanUsername });
+  return { ok: true };
+}
+
 bot.onText(/^\/remove(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
   if (!ownerOnly(msg)) return;
 
   const payload = parseRemovePayload(msg.text || "");
-  if (!payload) {
-    return bot.sendMessage(
-      msg.chat.id,
-      "Usage:\n/remove <name> OR @username OR id:123\n\nExamples:\n/remove mg mg\n/remove @mgmg\n/remove id:33984585"
-    );
-  }
+  if (!payload) return bot.sendMessage(msg.chat.id, "Usage:\n/remove <name> OR @username OR id:123");
 
-  const uid = await resolveMemberIdForRemove(payload);
+  const uid = await resolveMemberIdForAny(payload);
   if (!uid) return bot.sendMessage(msg.chat.id, "❌ Could not resolve member id.");
 
   const exists = await redis.sismember(KEY_MEMBERS_SET, String(uid));
-  if (!exists) return bot.sendMessage(msg.chat.id, "ℹ️ Member not found in list.");
+  if (!exists) return bot.sendMessage(msg.chat.id, "ℹ️ Member not found.");
 
-  await removeMemberHard(uid, "owner_remove");
+  await removeMemberHard(uid);
   return bot.sendMessage(msg.chat.id, `✅ Removed member (hard): ${uid}`);
 });
 
-/* ================= OWNER COMMAND: /add ================= */
 bot.onText(/^\/add(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
   if (!ownerOnly(msg)) return;
 
   const payload = parseAddPayload(msg.text || "");
-  if (!payload) {
-    return bot.sendMessage(
-      msg.chat.id,
-      "Usage:\n/add <id> [@username] [name]\n\nExamples:\n/add 123456789 @mgmg Mg Mg\n/add id:123456789 Mg Mg @mgmg\n/add 123456789 Mg Mg\n\nRule:\n- Already exists by id/@username/name => NOT add again.\n- New add needs id."
-    );
-  }
+  if (!payload) return bot.sendMessage(msg.chat.id, "Usage:\n/add <id> [@username] [name]");
 
-  // exists by id/@username/name => do nothing (do not modify original)
   const resolved = await resolveMemberIdForAny(payload);
   if (resolved) {
     const exists = await redis.sismember(KEY_MEMBERS_SET, String(resolved));
-    if (exists) {
-      return bot.sendMessage(msg.chat.id, `ℹ️ Already exists. Not added again. (id: ${resolved})`);
-    }
+    if (exists) return bot.sendMessage(msg.chat.id, `ℹ️ Already exists. (id: ${resolved})`);
   }
 
-  // new add must have id
-  if (!payload.id) {
-    return bot.sendMessage(
-      msg.chat.id,
-      "❌ Not found. New add needs id.\nExample:\n/add 123456789 @username Name Surname"
-    );
-  }
+  if (!payload.id) return bot.sendMessage(msg.chat.id, "❌ New add needs id.\nExample:\n/add 123456789 @user Name");
 
-  const r = await addMemberManual(
-    { id: payload.id, name: payload.name || "", username: payload.username || "" },
-    "owner_add"
-  );
+  const r = await addMemberManual({ id: payload.id, name: payload.name || "", username: payload.username || "" }, "owner_add");
 
-  if (!r.ok && r.error === "exists") {
-    return bot.sendMessage(msg.chat.id, `ℹ️ Already exists. Not added again. (id: ${String(payload.id)})`);
-  }
+  if (!r.ok && r.error === "exists") return bot.sendMessage(msg.chat.id, "ℹ️ Already exists.");
   if (!r.ok && r.error === "excluded") return bot.sendMessage(msg.chat.id, "❌ This user is excluded.");
   if (!r.ok && r.error === "invalid_id") return bot.sendMessage(msg.chat.id, "❌ Invalid id.");
   if (!r.ok) return bot.sendMessage(msg.chat.id, "❌ Failed to add.");
 
+  return bot.sendMessage(msg.chat.id, `✅ Added member: ${String(payload.id)}\n• name: ${payload.name || "-"}\n• username: ${payload.username ? "@" + String(payload.username).replace("@", "") : "-"}\n• dm_ready: 1`);
+});
+
+/* ================= OWNER STAGING COMMANDS (DM Only) ================= */
+
+// Join Gate staging
+bot.onText(/^\/joincap(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const cap = extractCmdText(msg.text, "joincap");
+  if (!cap) return bot.sendMessage(msg.chat.id, "Usage:\n/joincap <text>");
+  await redis.set(KEY_STG_JOIN_CAP, String(cap));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Join Caption saved. Use /upload to apply.");
+});
+
+bot.onText(/^\/joinbuttomlabel(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const label = extractCmdText(msg.text, "joinbuttomlabel");
+  if (!label) return bot.sendMessage(msg.chat.id, "Usage:\n/joinbuttomlabel <label>");
+  await redis.set(KEY_STG_JOIN_BTN, String(label));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Join Button Label saved. Use /upload to apply.");
+});
+
+// Register DM staging
+bot.onText(/^\/regcaption(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const cap = extractCmdText(msg.text, "regcaption");
+  if (!cap) return bot.sendMessage(msg.chat.id, "Usage:\n/regcaption <text>");
+  await redis.set(KEY_STG_REG_CAP, String(cap));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Register Caption saved. Use /upload to apply.");
+});
+
+bot.onText(/^\/regbuttomlabel(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const label = extractCmdText(msg.text, "regbuttomlabel");
+  if (!label) return bot.sendMessage(msg.chat.id, "Usage:\n/regbuttomlabel <label>");
+  await redis.set(KEY_STG_REG_BTN, String(label));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Register Button Label saved. Use /upload to apply.");
+});
+
+bot.onText(/^\/regimage(@\w+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const r = msg.reply_to_message;
+  const photo = r?.photo?.length ? r.photo[r.photo.length - 1] : null;
+  if (!photo?.file_id) return bot.sendMessage(msg.chat.id, "Reply a PHOTO then type:\n/regimage");
+  await redis.set(KEY_STG_REG_MODE, "photo");
+  await redis.set(KEY_STG_REG_FILE, String(photo.file_id));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Register IMAGE saved. Use /upload to apply.");
+});
+
+bot.onText(/^\/regvideo(@\w+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const r = msg.reply_to_message;
+  const vid = r?.video;
+  if (!vid?.file_id) return bot.sendMessage(msg.chat.id, "Reply a VIDEO then type:\n/regvideo");
+  await redis.set(KEY_STG_REG_MODE, "video");
+  await redis.set(KEY_STG_REG_FILE, String(vid.file_id));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Register VIDEO saved. Use /upload to apply.");
+});
+
+// /upload apply (Join + Reg)
+bot.onText(/^\/upload(@\w+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+
+  const stgJoinCap = await redis.get(KEY_STG_JOIN_CAP);
+  const stgJoinBtn = await redis.get(KEY_STG_JOIN_BTN);
+
+  let joinApplied = 0;
+  if (stgJoinCap != null) { await redis.set(KEY_JOIN_CAP, String(stgJoinCap)); await redis.del(KEY_STG_JOIN_CAP); joinApplied++; }
+  if (stgJoinBtn != null) { await redis.set(KEY_JOIN_BTN, String(stgJoinBtn)); await redis.del(KEY_STG_JOIN_BTN); joinApplied++; }
+
+  const stgRegCap = await redis.get(KEY_STG_REG_CAP);
+  const stgRegBtn = await redis.get(KEY_STG_REG_BTN);
+  const stgRegMode = await redis.get(KEY_STG_REG_MODE);
+  const stgRegFile = await redis.get(KEY_STG_REG_FILE);
+
+  let regApplied = 0;
+  if (stgRegCap != null) { await redis.set(KEY_REG_CAP, String(stgRegCap)); await redis.del(KEY_STG_REG_CAP); regApplied++; }
+  if (stgRegBtn != null) { await redis.set(KEY_REG_BTN, String(stgRegBtn)); await redis.del(KEY_STG_REG_BTN); regApplied++; }
+  if (stgRegMode != null) { await redis.set(KEY_REG_MODE, String(stgRegMode)); await redis.del(KEY_STG_REG_MODE); regApplied++; }
+  if (stgRegFile != null) { await redis.set(KEY_REG_FILE, String(stgRegFile)); await redis.del(KEY_STG_REG_FILE); regApplied++; }
+
+  if (!joinApplied && !regApplied) return bot.sendMessage(msg.chat.id, "ℹ️ Nothing staged.");
+
   return bot.sendMessage(
     msg.chat.id,
-    `✅ Added member: ${String(payload.id)}\n• name: ${payload.name || "-"}\n• username: ${payload.username ? "@" + String(payload.username).replace("@", "") : "-"}\n• dm_ready: 1`
+    "✅ Applied staging:\n" +
+      `• Join Gate: ${joinApplied ? "updated" : "no changes"}\n` +
+      `• Register DM: ${regApplied ? "updated" : "no changes"}`
   );
+});
+
+// Channel Post staging + upload
+bot.onText(/^\/postchannelcaption(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const cap = extractCmdText(msg.text, "postchannelcaption");
+  if (!cap) return bot.sendMessage(msg.chat.id, "Usage:\n/postchannelcaption <text>");
+  await redis.set(KEY_STG_POST_CAP, String(cap));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Channel Post caption saved. Use /uploadchannelpost to post.");
+});
+
+bot.onText(/^\/postchannelbuttomlabel(@\w+)?(\s+[\s\S]+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const label = extractCmdText(msg.text, "postchannelbuttomlabel");
+  if (!label) return bot.sendMessage(msg.chat.id, "Usage:\n/postchannelbuttomlabel <label>");
+  await redis.set(KEY_STG_POST_BTN, String(label));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Channel Post button label saved. Use /uploadchannelpost to post.");
+});
+
+bot.onText(/^\/postchannelimage(@\w+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const r = msg.reply_to_message;
+  const photo = r?.photo?.length ? r.photo[r.photo.length - 1] : null;
+  if (!photo?.file_id) return bot.sendMessage(msg.chat.id, "Reply a PHOTO then type:\n/postchannelimage");
+  await redis.set(KEY_STG_POST_MODE, "photo");
+  await redis.set(KEY_STG_POST_FILE, String(photo.file_id));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Channel Post IMAGE saved. Use /uploadchannelpost to post.");
+});
+
+bot.onText(/^\/postchannelvideo(@\w+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const r = msg.reply_to_message;
+  const vid = r?.video;
+  if (!vid?.file_id) return bot.sendMessage(msg.chat.id, "Reply a VIDEO then type:\n/postchannelvideo");
+  await redis.set(KEY_STG_POST_MODE, "video");
+  await redis.set(KEY_STG_POST_FILE, String(vid.file_id));
+  return bot.sendMessage(msg.chat.id, "✅ Staged Channel Post VIDEO saved. Use /uploadchannelpost to post.");
+});
+
+bot.onText(/^\/uploadchannelpost(@\w+)?$/i, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  if (!CHANNEL_CHAT) return bot.sendMessage(msg.chat.id, "❌ CHANNEL_CHAT env not set.");
+
+  const cap = (await redis.get(KEY_STG_POST_CAP)) || "";
+  const btn = (await redis.get(KEY_STG_POST_BTN)) || "▶️ Register / Enable DM";
+  const mode = (await redis.get(KEY_STG_POST_MODE)) || "text";
+  const fileId = (await redis.get(KEY_STG_POST_FILE)) || "";
+
+  const kb = await buildStartKeyboard(btn);
+
+  try {
+    if (mode === "photo" && fileId) {
+      await bot.sendPhoto(String(CHANNEL_CHAT), fileId, { caption: cap || undefined, reply_markup: kb || undefined });
+    } else if (mode === "video" && fileId) {
+      await bot.sendVideo(String(CHANNEL_CHAT), fileId, { caption: cap || undefined, reply_markup: kb || undefined, supports_streaming: true });
+    } else {
+      const text = cap && String(cap).trim() ? String(cap) : " ";
+      await bot.sendMessage(String(CHANNEL_CHAT), text, { reply_markup: kb || undefined });
+    }
+    return bot.sendMessage(msg.chat.id, "✅ Posted to channel.");
+  } catch (e) {
+    return bot.sendMessage(msg.chat.id, `❌ Post failed: ${e?.message || String(e)}`);
+  }
 });
 
 /* ================= CALLBACKS ================= */
@@ -944,6 +920,7 @@ bot.on("callback_query", async (q) => {
     const data = String(q?.data || "");
     const fromId = String(q?.from?.id || "");
     const chatId = q?.message?.chat?.id;
+
     if (!chatId) {
       try { await bot.answerCallbackQuery(q.id); } catch (_) {}
       return;
@@ -959,10 +936,7 @@ bot.on("callback_query", async (q) => {
       await bot.answerCallbackQuery(q.id);
 
       const ok = await isChannelMember(fromId);
-      if (!ok) {
-        await sendJoinGate(chatId, fromId);
-        return;
-      }
+      if (!ok) { await sendJoinGate(chatId, fromId); return; }
 
       await proceedRegisterAndReply(chatId, q.from);
       return;
@@ -1006,26 +980,19 @@ bot.on("message", async (msg) => {
       await redis.set(KEY_LAST_GROUP, String(msg.chat.id));
       await ensurePinnedRegisterMessage(msg.chat.id);
 
-      // join -> auto save (active=1) and add to pool if not winner
       if (msg.new_chat_members && msg.new_chat_members.length) {
         await autoDelete(msg.chat.id, msg.message_id, 2000);
-
         for (const u of msg.new_chat_members) {
           if (!u) continue;
           if (isExcludedUser(u.id)) continue;
-
-          // if they were hard-removed before, this will re-add them ✅
           await saveMember(u, "group_join");
         }
       }
 
-      // leave -> mark inactive (member remains in list, but removed from pool)
       if (msg.left_chat_member) {
         await autoDelete(msg.chat.id, msg.message_id, 2000);
         const u = msg.left_chat_member;
-        if (u && !isExcludedUser(u.id)) {
-          await markInactive(u.id, "left_group");
-        }
+        if (u && !isExcludedUser(u.id)) await markInactive(u.id, "left_group");
       }
     }
   } catch (e) {
@@ -1040,13 +1007,9 @@ bot.onText(/^\/start(?:\s+(.+))?/i, async (msg) => {
     const u = msg.from;
     if (!u) return;
 
-    // channel gate (register only)
     if (CHANNEL_CHAT) {
       const ok = await isChannelMember(u.id);
-      if (!ok) {
-        await sendJoinGate(msg.chat.id, u.id);
-        return;
-      }
+      if (!ok) { await sendJoinGate(msg.chat.id, u.id); return; }
     }
 
     await proceedRegisterAndReply(msg.chat.id, u);
@@ -1060,7 +1023,6 @@ async function boot() {
   const me = await bot.getMe();
   BOT_USERNAME = me.username ? String(me.username) : null;
 
-  // defaults
   if (!(await redis.get(KEY_PIN_MODE))) await redis.set(KEY_PIN_MODE, "text");
   if (!(await redis.get(KEY_PIN_TEXT))) {
     await redis.set(
@@ -1078,8 +1040,7 @@ async function boot() {
   if (!(await redis.get(KEY_JOIN_BTN))) await redis.set(KEY_JOIN_BTN, "📢 Join Channel");
 
   if (!(await redis.get(KEY_REG_MODE))) await redis.set(KEY_REG_MODE, "text");
-  if (!(await redis.get(KEY_REG_CAP)))
-    await redis.set(KEY_REG_CAP, "✅ Registered ပြီးပါပြီ。\n\n📩 Prize ပေါက်ရင် ဒီ DM ကနေ ဆက်သွယ်ပေးပါမယ်။");
+  if (!(await redis.get(KEY_REG_CAP))) await redis.set(KEY_REG_CAP, "✅ Registered ပြီးပါပြီ。\n\n📩 Prize ပေါက်ရင် ဒီ DM ကနေ ဆက်သွယ်ပေးပါမယ်။");
   if (!(await redis.get(KEY_REG_BTN))) await redis.set(KEY_REG_BTN, "");
 
   await setupWebhook();
@@ -1089,9 +1050,5 @@ async function boot() {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", async () => {
   console.log("Server running on port", PORT);
-  try {
-    await boot();
-  } catch (e) {
-    console.error("Boot error:", e);
-  }
+  try { await boot(); } catch (e) { console.error("Boot error:", e); }
 });
