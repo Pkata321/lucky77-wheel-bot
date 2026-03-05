@@ -371,6 +371,24 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
 
+/* ================= PRIZES CONFIG ================= */
+app.post("/config/prizes", requireApiKey, async (req, res) => {
+  try {
+    const { prizeText } = req.body || {};
+    const bag = parsePrizeTextExpand(prizeText);
+
+    if (!bag.length) return res.status(400).json({ ok: false, error: "no_valid_prizes" });
+
+    await redis.set(KEY_PRIZE_SOURCE, String(prizeText || ""));
+    await redis.del(KEY_PRIZE_BAG);
+    await redis.rpush(KEY_PRIZE_BAG, ...bag);
+
+    res.json({ ok: true, bag_size: bag.length });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 app.get("/", (req, res) => res.send("Lucky77 Wheel Bot ✅"));
 /* ================= Webhook ================= */
 
@@ -553,6 +571,52 @@ app.get("/history", requireApiKey, async (req, res) => {
   }
 });
 
+/* ================= WINNERS (UI LIST) ================= */
+app.get("/winners", requireApiKey, async (req, res) => {
+  try {
+    const list = await redis.lrange(KEY_HISTORY_LIST, 0, -1);
+
+    const winners = [];
+    for (const raw of list) {
+      let it = null;
+      try { it = JSON.parse(raw); } catch { continue; }
+      if (!it) continue;
+
+      const uid = String(it.user_id || "").trim();
+      if (!uid) continue;
+
+      const meta = await redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}));
+      const done = String(meta?.done || "0") === "1";
+
+      const username = String(it.username || meta?.username || "").trim();
+      const hasUsername = !!username;
+
+      winners.push({
+        turn: Number(it.turn || meta?.turn || 0),
+        at: String(it.at || meta?.at || ""),
+        prize: String(it.prize || meta?.prize || ""),
+
+        user_id: uid,
+        name: String(it.name || meta?.name || ""),
+        username,
+        display: String(it.display || meta?.display || uid),
+
+        done,
+        done_at: String(meta?.done_at || ""),
+
+        // ✅ UI button logic helper fields
+        need_notice_dm: !hasUsername,          // username မရှိ => UI က Notice DM button ပြ
+        telegram_username: hasUsername ? username.replace(/^@+/, "") : "",
+      });
+    }
+
+    winners.sort((a, b) => Number(a.turn || 0) - Number(b.turn || 0));
+    res.json({ ok: true, total: winners.length, winners });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 /* ================= SPIN ================= */
 
 app.post("/spin", requireApiKey, async (req, res) => {
@@ -679,54 +743,33 @@ if (!userId || !member) {
   }
 });
 /* ================= NOTICE (DM WINNER) ================= */
-
 app.post("/notice", requireApiKey, async (req, res) => {
   try {
-    const { user_id, prize } = req.body;
-
-    if (!user_id) {
-      return res.status(400).json({ ok: false, error: "user_id missing" });
-    }
+    const { user_id, prize, text } = req.body || {};
+    if (!user_id) return res.status(400).json({ ok: false, error: "user_id missing" });
 
     const uid = String(user_id);
+    const pz = prize ? String(prize) : "";
 
     const m = await redis.hgetall(KEY_MEMBER_HASH(uid));
-
-    if (!m) {
-      return res.status(404).json({ ok: false, error: "member_not_found" });
-    }
-
-    /* ===== Myanmar DM message (မင်းရေးထားတာ 그대로) ===== */
+    if (!m) return res.status(404).json({ ok: false, error: "member_not_found" });
 
     const msgText =
-`Congratulation 🥳🥳🥳
+  text && String(text).trim()
+    ? String(text)
+    : "Congratulations 🥳🥳🥳ပါအကိုရှင့်\n" +
+      `လက်ကီး77 ရဲ့ လစဉ်ဗလာမပါလက်ကီးဝှီး အစီစဉ်မှာ ယူနစ် ${pz || "—"} ကံထူးသွားပါတယ်ရှင့်☘️\n` +
+      "ဂိမ်းယူနစ်လေး ထည့်ပေးဖို့ အကို့ဂိမ်းအကောင့်လေး ပို့ပေးပါရှင့်";
 
-Lucky77 Lucky Wheel မှာ
-"${prize || "Prize"}"
-ပေါက်ခဲ့ပါတယ်။
-
-ကျေးဇူးပြု၍ ဂိမ်းအကောင့် (ID) ကို
-ဒီ DM မှာ reply ပြန်ပေးပါ။
-
-Lucky77 Official`;
-
-    /* ===== send DM ===== */
-
-    await bot.sendMessage(uid, msgText);
-
-    /* ===== save notice context ===== */
+    // ✅ IMPORTANT: Number(uid)
+    await bot.sendMessage(Number(uid), msgText);
 
     await redis.set(
       KEY_NOTICE_CTX(uid),
-      JSON.stringify({
-        user_id: uid,
-        prize: prize || "",
-        at: nowISO(),
-      })
+      JSON.stringify({ user_id: uid, prize: pz, at: nowISO() })
     );
 
     res.json({ ok: true });
-
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -761,19 +804,17 @@ bot.on("message", async (msg) => {
     /* ===== forward to OWNER ===== */
 
     const header =
-`📨 Winner Reply (Auto Forward)
+`📨 အနိုင်ရသူ Reply (Auto Forward)
 
-Winner : ${msg.from.first_name || ""}
+အမည် : ${msg.from.first_name || "-"}
 Username : ${msg.from.username ? "@" + msg.from.username : "-"}
 ID : ${uid}
-
-Prize : ${ctx.prize}
-
+ဆု : ${ctx.prize}
 Reply :
 ${text}
 `;
 
-    await bot.sendMessage(OWNER_ID, header);
+    await bot.sendMessage(Number(OWNER_ID), header);
 
   } catch (err) {
     console.error("winner reply forward error", err);
@@ -852,30 +893,27 @@ bot.onText(/\/start/, async (msg) => {
 
 /* ================= OWNER COMMANDS ================= */
 
+// ဒီအောက်မှာ ထည့် ✅
 bot.onText(/\/syncmembers/, async (msg) => {
-
   if (!ownerOnly(msg)) return;
+  if (!CHANNEL_CHAT) return bot.sendMessage(msg.chat.id, "CHANNEL_CHAT မရှိသေးပါ");
 
   const ids = await redis.smembers(KEY_MEMBERS_SET);
-
   let fixed = 0;
 
   for (const id of ids) {
     try {
-
       const m = await bot.getChatMember(String(CHANNEL_CHAT), Number(id));
-
       if (!m || !m.user) continue;
-
       await saveMember(m.user, "sync_channel");
-
       fixed++;
-
-    } catch (_) {}
+    } catch (e) {
+      // optional: error log
+      // console.log("sync fail", id, e.message);
+    }
   }
 
   bot.sendMessage(msg.chat.id, `Members synced (channel) : ${fixed}`);
-
 });
 
 
