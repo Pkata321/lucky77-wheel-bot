@@ -752,17 +752,36 @@ app.post("/notice", requireApiKey, async (req, res) => {
     const pz = prize ? String(prize) : "";
 
     const m = await redis.hgetall(KEY_MEMBER_HASH(uid));
-    if (!m) return res.status(404).json({ ok: false, error: "member_not_found" });
+    if (!m || !m.id) return res.status(404).json({ ok: false, error: "member_not_found" });
 
     const msgText =
-  text && String(text).trim()
-    ? String(text)
-    : "Congratulations 🥳🥳🥳ပါအကိုရှင့်\n" +
-      `လက်ကီး77 ရဲ့ လစဉ်ဗလာမပါလက်ကီးဝှီး အစီစဉ်မှာ ယူနစ် ${pz || "—"} ကံထူးသွားပါတယ်ရှင့်☘️\n` +
-      "ဂိမ်းယူနစ်လေး ထည့်ပေးဖို့ အကို့ဂိမ်းအကောင့်လေး ပို့ပေးပါရှင့်";
+      text && String(text).trim()
+        ? String(text)
+        : "Congratulations 🥳🥳🥳ပါအကိုရှင့်\n" +
+          `လက်ကီး77 ရဲ့ လစဉ်ဗလာမပါလက်ကီးဝှီး အစီစဉ်မှာ ယူနစ် ${pz || "—"} ကံထူးသွားပါတယ်ရှင့်☘️\n` +
+          "ဂိမ်းယူနစ်လေး ထည့်ပေးဖို့ အကို့ဂိမ်းအကောင့်လေး ပို့ပေးပါရှင့်";
 
-    // ✅ IMPORTANT: Number(uid)
-    await bot.sendMessage(Number(uid), msgText);
+    try {
+      await bot.sendMessage(Number(uid), msgText);
+
+      // ✅ DM ok
+      await redis.hset(KEY_MEMBER_HASH(uid), {
+        dm_ready: "1",
+        dm_ready_at: nowISO(),
+      });
+
+    } catch (e) {
+      // ✅ DM fail
+      await redis.hset(KEY_MEMBER_HASH(uid), {
+        dm_ready: "0",
+      });
+
+      return res.status(200).json({
+        ok: false,
+        error: "dm_failed",
+        detail: e?.message || "sendMessage_failed",
+      });
+    }
 
     await redis.set(
       KEY_NOTICE_CTX(uid),
@@ -770,6 +789,7 @@ app.post("/notice", requireApiKey, async (req, res) => {
     );
 
     res.json({ ok: true });
+
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -777,31 +797,26 @@ app.post("/notice", requireApiKey, async (req, res) => {
 
 
 /* ================= WINNER REPLY FORWARD ================= */
-
 bot.on("message", async (msg) => {
   try {
-
-    if (!msg.chat) return;
+    if (!msg || !msg.chat || !msg.from) return;
 
     const chatType = String(msg.chat.type);
-
-    /* ===== private DM only ===== */
-
     if (chatType !== "private") return;
 
     const uid = String(msg.from.id);
+    if (isOwner(uid)) return;
 
     const ctxRaw = await redis.get(KEY_NOTICE_CTX(uid));
-
     if (!ctxRaw) return;
 
-    const ctx = JSON.parse(ctxRaw);
+    let ctx = {};
+    try { ctx = JSON.parse(ctxRaw); } catch {}
 
-    const text = msg.text || "";
+    const hasText = msg.text && String(msg.text).trim();
+    const hasMedia = !!(msg.photo || msg.video || msg.document || msg.voice || msg.audio);
 
-    if (!text.trim()) return;
-
-    /* ===== forward to OWNER ===== */
+    if (!hasText && !hasMedia) return;
 
     const header =
 `📨 အနိုင်ရသူ Reply (Auto Forward)
@@ -809,12 +824,20 @@ bot.on("message", async (msg) => {
 အမည် : ${msg.from.first_name || "-"}
 Username : ${msg.from.username ? "@" + msg.from.username : "-"}
 ID : ${uid}
-ဆု : ${ctx.prize}
-Reply :
-${text}
+ဆု : ${ctx.prize || "-"}
 `;
 
-    await bot.sendMessage(Number(OWNER_ID), header);
+    if (hasText) {
+      await bot.sendMessage(Number(OWNER_ID), `${header}\nReply:\n${msg.text}`);
+    } else {
+      await bot.sendMessage(Number(OWNER_ID), `${header}\nReply: (media)`);
+    }
+
+    if (hasMedia) {
+      try {
+        await bot.forwardMessage(Number(OWNER_ID), msg.chat.id, msg.message_id);
+      } catch (_) {}
+    }
 
   } catch (err) {
     console.error("winner reply forward error", err);
@@ -888,7 +911,44 @@ bot.onText(/\/start/, async (msg) => {
   }
 });
 
+/* ================= CHANNEL MEMBER UPDATE ================= */
+bot.on("chat_member", async (upd) => {
+  try {
+    if (!upd || !upd.chat || !upd.new_chat_member) return;
+    if (!CHANNEL_CHAT) return;
 
+    const chatUsername = String(upd.chat.username || "");
+    const chatId = String(upd.chat.id || "");
+
+    const targetA = String(CHANNEL_CHAT);
+    const targetB = String(CHANNEL_CHAT).replace("@", "");
+
+    const sameChannel =
+      chatId === targetA ||
+      chatUsername === targetB;
+
+    if (!sameChannel) return;
+
+    const user = upd.new_chat_member.user;
+    const st = String(upd.new_chat_member.status || "");
+
+    if (!user || !user.id) return;
+    if (isExcludedUser(user.id)) return;
+
+    if (st === "left" || st === "kicked") {
+      await markInactive(String(user.id), st);
+      return;
+    }
+
+    if (st === "member" || st === "administrator" || st === "creator") {
+      await saveMember(user, "channel_member_update");
+      return;
+    }
+
+  } catch (err) {
+    console.error("chat_member update error", err);
+  }
+});
 
 
 /* ================= OWNER COMMANDS ================= */
