@@ -19,6 +19,7 @@ const {
   WEBHOOK_SECRET,
   CHANNEL_CHAT,
   CHANNEL_LINK,
+  LEGACY_KEY_PREFIXES,
 } = process.env;
 
 function must(v, name) {
@@ -47,47 +48,95 @@ const redis = new Redis({
 });
 
 /* ================= Keys ================= */
+/* CURRENT PREFIX */
 const KEY_PREFIX = "lucky77:pro:v3:channel";
 
-const KEY_MEMBERS_SET = `${KEY_PREFIX}:members:set`;
-const KEY_MEMBER_HASH = (id) => `${KEY_PREFIX}:member:${id}`;
+/* LEGACY PREFIXES - old member data will be COPY/MERGE only, never deleted */
+const LEGACY_PREFIX_LIST = [
+  "lucky77:pro:v2:remax",
+  ...(String(LEGACY_KEY_PREFIXES || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)),
+].filter(Boolean);
 
-const KEY_POOL_SET = `${KEY_PREFIX}:pool:set`;
-const KEY_WINNERS_SET = `${KEY_PREFIX}:winners:set`;
-const KEY_HISTORY_LIST = `${KEY_PREFIX}:history:list`;
-const KEY_PRIZE_BAG = `${KEY_PREFIX}:prizes:bag`;
-const KEY_PRIZE_SOURCE = `${KEY_PREFIX}:prizes:source`;
-const KEY_TURN_SEQ = `${KEY_PREFIX}:turn:seq`;
-const KEY_WINNER_META = (uid) => `${KEY_PREFIX}:winner:${uid}`;
-const KEY_NOTICE_CTX = (uid) => `${KEY_PREFIX}:notice:ctx:${uid}`;
+function keysForPrefix(prefix) {
+  return {
+    MEMBERS_SET: `${prefix}:members:set`,
+    MEMBER_HASH: (id) => `${prefix}:member:${id}`,
+    POOL_SET: `${prefix}:pool:set`,
+    WINNERS_SET: `${prefix}:winners:set`,
+    HISTORY_LIST: `${prefix}:history:list`,
+    PRIZE_BAG: `${prefix}:prizes:bag`,
+    PRIZE_SOURCE: `${prefix}:prizes:source`,
+    TURN_SEQ: `${prefix}:turn:seq`,
+    WINNER_META: (uid) => `${prefix}:winner:${uid}`,
+    NOTICE_CTX: (uid) => `${prefix}:notice:ctx:${uid}`,
+    USER_INDEX: (u) => `${prefix}:index:username:${u}`,
+    NAME_INDEX: (n) => `${prefix}:index:name:${n}`,
+    JOIN_CAP: `${prefix}:join:cap`,
+    JOIN_BTN: `${prefix}:join:btn`,
+    REG_CAP: `${prefix}:reg:cap`,
+    REG_BTN: `${prefix}:reg:btn`,
+    REG_MODE: `${prefix}:reg:mode`,
+    REG_FILE: `${prefix}:reg:file`,
+    STG_JOIN_CAP: `${prefix}:stg:join:cap`,
+    STG_JOIN_BTN: `${prefix}:stg:join:btn`,
+    STG_REG_CAP: `${prefix}:stg:reg:cap`,
+    STG_REG_BTN: `${prefix}:stg:reg:btn`,
+    STG_REG_MODE: `${prefix}:stg:reg:mode`,
+    STG_REG_FILE: `${prefix}:stg:reg:file`,
+    STG_POST_CAP: `${prefix}:stg:post:cap`,
+    STG_POST_BTN: `${prefix}:stg:post:btn`,
+    STG_POST_MODE: `${prefix}:stg:post:mode`,
+    STG_POST_FILE: `${prefix}:stg:post:file`,
+    SCAN_STATUS: `${prefix}:scan:status`,
+    SCAN_LAST_AT: `${prefix}:scan:last_at`,
+    SCAN_LAST_SUMMARY: `${prefix}:scan:last_summary`,
+    SPIN_LOCK: `${prefix}:spin:lock`,
+  };
+}
 
-const KEY_USER_INDEX = (u) => `${KEY_PREFIX}:index:username:${u}`;
-const KEY_NAME_INDEX = (n) => `${KEY_PREFIX}:index:name:${n}`;
+const K = keysForPrefix(KEY_PREFIX);
 
-const KEY_JOIN_CAP = `${KEY_PREFIX}:join:cap`;
-const KEY_JOIN_BTN = `${KEY_PREFIX}:join:btn`;
+const KEY_MEMBERS_SET = K.MEMBERS_SET;
+const KEY_MEMBER_HASH = K.MEMBER_HASH;
+const KEY_POOL_SET = K.POOL_SET;
+const KEY_WINNERS_SET = K.WINNERS_SET;
+const KEY_HISTORY_LIST = K.HISTORY_LIST;
+const KEY_PRIZE_BAG = K.PRIZE_BAG;
+const KEY_PRIZE_SOURCE = K.PRIZE_SOURCE;
+const KEY_TURN_SEQ = K.TURN_SEQ;
+const KEY_WINNER_META = K.WINNER_META;
+const KEY_NOTICE_CTX = K.NOTICE_CTX;
 
-const KEY_REG_CAP = `${KEY_PREFIX}:reg:cap`;
-const KEY_REG_BTN = `${KEY_PREFIX}:reg:btn`;
-const KEY_REG_MODE = `${KEY_PREFIX}:reg:mode`;
-const KEY_REG_FILE = `${KEY_PREFIX}:reg:file`;
+const KEY_USER_INDEX = K.USER_INDEX;
+const KEY_NAME_INDEX = K.NAME_INDEX;
 
-const KEY_STG_JOIN_CAP = `${KEY_PREFIX}:stg:join:cap`;
-const KEY_STG_JOIN_BTN = `${KEY_PREFIX}:stg:join:btn`;
-const KEY_STG_REG_CAP = `${KEY_PREFIX}:stg:reg:cap`;
-const KEY_STG_REG_BTN = `${KEY_PREFIX}:stg:reg:btn`;
-const KEY_STG_REG_MODE = `${KEY_PREFIX}:stg:reg:mode`;
-const KEY_STG_REG_FILE = `${KEY_PREFIX}:stg:reg:file`;
+const KEY_JOIN_CAP = K.JOIN_CAP;
+const KEY_JOIN_BTN = K.JOIN_BTN;
 
-const KEY_STG_POST_CAP = `${KEY_PREFIX}:stg:post:cap`;
-const KEY_STG_POST_BTN = `${KEY_PREFIX}:stg:post:btn`;
-const KEY_STG_POST_MODE = `${KEY_PREFIX}:stg:post:mode`;
-const KEY_STG_POST_FILE = `${KEY_PREFIX}:stg:post:file`;
+const KEY_REG_CAP = K.REG_CAP;
+const KEY_REG_BTN = K.REG_BTN;
+const KEY_REG_MODE = K.REG_MODE;
+const KEY_REG_FILE = K.REG_FILE;
 
-const KEY_SCAN_STATUS = `${KEY_PREFIX}:scan:status`;
-const KEY_SCAN_LAST_AT = `${KEY_PREFIX}:scan:last_at`;
-const KEY_SCAN_LAST_SUMMARY = `${KEY_PREFIX}:scan:last_summary`;
-const KEY_SPIN_LOCK = `${KEY_PREFIX}:spin:lock`;
+const KEY_STG_JOIN_CAP = K.STG_JOIN_CAP;
+const KEY_STG_JOIN_BTN = K.STG_JOIN_BTN;
+const KEY_STG_REG_CAP = K.STG_REG_CAP;
+const KEY_STG_REG_BTN = K.STG_REG_BTN;
+const KEY_STG_REG_MODE = K.STG_REG_MODE;
+const KEY_STG_REG_FILE = K.STG_REG_FILE;
+
+const KEY_STG_POST_CAP = K.STG_POST_CAP;
+const KEY_STG_POST_BTN = K.STG_POST_BTN;
+const KEY_STG_POST_MODE = K.STG_POST_MODE;
+const KEY_STG_POST_FILE = K.STG_POST_FILE;
+
+const KEY_SCAN_STATUS = K.SCAN_STATUS;
+const KEY_SCAN_LAST_AT = K.SCAN_LAST_AT;
+const KEY_SCAN_LAST_SUMMARY = K.SCAN_LAST_SUMMARY;
+const KEY_SPIN_LOCK = K.SPIN_LOCK;
 
 /* ================= Bot ================= */
 const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
@@ -205,6 +254,12 @@ function parsePrizeTextExpand(prizeText) {
   return bag;
 }
 
+function deriveDisplay(name, username, id) {
+  const cleanName = String(name || "").trim();
+  const cleanUsername = String(username || "").trim().replace(/^@+/, "");
+  return cleanName || (cleanUsername ? `@${cleanUsername}` : String(id));
+}
+
 async function indexMemberIdentity({ id, name, username }) {
   const u = normalizeUsername(username);
   const n = normalizeName(name);
@@ -212,10 +267,57 @@ async function indexMemberIdentity({ id, name, username }) {
   if (n) await redis.set(KEY_NAME_INDEX(n), String(id));
 }
 
-function deriveDisplay(name, username, id) {
-  const cleanName = String(name || "").trim();
-  const cleanUsername = String(username || "").trim().replace(/^@+/, "");
-  return cleanName || (cleanUsername ? `@${cleanUsername}` : String(id));
+async function maybeBackfillMemberIdentity(userId) {
+  const uid = String(userId || "");
+  if (!uid || !CHANNEL_CHAT) return null;
+
+  const prev = await redis.hgetall(KEY_MEMBER_HASH(uid)).catch(() => ({}));
+  const prevName = String(prev?.name || "").trim();
+  const prevUsername = String(prev?.username || "").trim().replace(/^@+/, "");
+  const prevDisplay = String(prev?.display || "").trim();
+
+  if (prevName && prevUsername && prevDisplay) {
+    return {
+      id: uid,
+      name: prevName,
+      username: prevUsername,
+      display: prevDisplay,
+      updated: false,
+    };
+  }
+
+  try {
+    const m = await bot.getChatMember(String(CHANNEL_CHAT), Number(uid));
+    const u = m?.user || null;
+    if (!u) return null;
+
+    const { name, username } = nameParts(u);
+    const cleanName = String(name || "").trim() || prevName;
+    const cleanUsername = String(username || "").trim().replace(/^@+/, "") || prevUsername;
+    const display = deriveDisplay(cleanName, cleanUsername, uid);
+
+    await redis.hset(KEY_MEMBER_HASH(uid), {
+      id: uid,
+      name: cleanName,
+      username: cleanUsername,
+      display,
+      last_seen_at: String(prev?.last_seen_at || ""),
+      registered_at: String(prev?.registered_at || ""),
+      active: String(prev?.active ?? "1"),
+      removed: String(prev?.removed || "0"),
+      left_at: String(prev?.left_at || ""),
+      left_reason: String(prev?.left_reason || ""),
+      dm_ready: String(prev?.dm_ready || "0"),
+      dm_ready_at: String(prev?.dm_ready_at || ""),
+      source: String(prev?.source || "backfill"),
+      last_scan_at: String(prev?.last_scan_at || ""),
+    });
+
+    await indexMemberIdentity({ id: uid, name: cleanName, username: cleanUsername });
+    return { id: uid, name: cleanName, username: cleanUsername, display, updated: true };
+  } catch (_) {
+    return null;
+  }
 }
 
 async function saveMember(u, source = "register") {
@@ -451,6 +553,10 @@ async function buildStatusText() {
   return (
 `Lucky77 Status
 
+PREFIX
+current: ${KEY_PREFIX}
+legacy: ${LEGACY_PREFIX_LIST.length ? LEGACY_PREFIX_LIST.join(", ") : "-"}
+
 LIVE JOIN
 cap: ${joinCap ? "yes" : "no"}
 btn: ${joinBtn || "-"}
@@ -565,7 +671,96 @@ async function rebuildPoolFromCurrentMembers() {
   return count;
 }
 
+/* ================= Legacy member import ================= */
+/* Copy/Merge only. Never delete old keys. */
+async function importLegacyMembers() {
+  let imported = 0;
+  let merged = 0;
+  let skipped = 0;
+
+  for (const legacyPrefix of LEGACY_PREFIX_LIST) {
+    if (!legacyPrefix || legacyPrefix === KEY_PREFIX) continue;
+    const LK = keysForPrefix(legacyPrefix);
+
+    let ids = [];
+    try {
+      ids = (await redis.smembers(LK.MEMBERS_SET)) || [];
+    } catch (_) {
+      ids = [];
+    }
+
+    for (const rawId of ids.map(String)) {
+      const uid = String(rawId || "");
+      if (!uid || isExcludedUser(uid)) {
+        skipped += 1;
+        continue;
+      }
+
+      const legacy = await redis.hgetall(LK.MEMBER_HASH(uid)).catch(() => null);
+      if (!legacy || Object.keys(legacy).length === 0) {
+        skipped += 1;
+        continue;
+      }
+
+      await redis.sadd(KEY_MEMBERS_SET, uid);
+
+      const cur = await redis.hgetall(KEY_MEMBER_HASH(uid)).catch(() => ({}));
+
+      const legacyName = String(legacy?.name || "").trim();
+      const legacyUsername = String(legacy?.username || "").trim().replace(/^@+/, "");
+      const legacyDisplay =
+        String(legacy?.display || "").trim() || deriveDisplay(legacyName, legacyUsername, uid);
+
+      const mergedDoc = {
+        id: uid,
+        name: String(cur?.name || "").trim() || legacyName,
+        username: String(cur?.username || "").trim().replace(/^@+/, "") || legacyUsername,
+        display:
+          String(cur?.display || "").trim() ||
+          legacyDisplay ||
+          deriveDisplay(legacyName, legacyUsername, uid),
+        active: String(cur?.active ?? legacy?.active ?? "1"),
+        removed: String(cur?.removed ?? legacy?.removed ?? "0"),
+        left_at: String(cur?.left_at || legacy?.left_at || ""),
+        left_reason: String(cur?.left_reason || legacy?.left_reason || ""),
+        dm_ready: String(cur?.dm_ready ?? legacy?.dm_ready ?? "0"),
+        dm_ready_at: String(cur?.dm_ready_at || legacy?.dm_ready_at || ""),
+        source: String(cur?.source || legacy?.source || `import:${legacyPrefix}`),
+        registered_at: String(cur?.registered_at || legacy?.registered_at || nowISO()),
+        last_seen_at: String(cur?.last_seen_at || legacy?.last_seen_at || ""),
+        last_scan_at: String(cur?.last_scan_at || legacy?.last_scan_at || ""),
+      };
+
+      await redis.hset(KEY_MEMBER_HASH(uid), mergedDoc);
+      await indexMemberIdentity({
+        id: uid,
+        name: mergedDoc.name,
+        username: mergedDoc.username,
+      });
+
+      if (cur && Object.keys(cur).length) merged += 1;
+      else imported += 1;
+    }
+  }
+
+  const pool = await rebuildPoolFromCurrentMembers();
+  return { imported, merged, skipped, pool };
+}
+
+/* ================= Scan ================= */
+/* IMPORTANT FIX:
+   - Scan only checks registered IDs
+   - Left users become inactive and are removed from pool
+   - If a left user rejoins the channel, scan does NOT auto-reactivate
+   - User must join + register again via /start to become active/pool again
+   - Scan is blocked while spin lock exists
+*/
 async function runScanMembers() {
+  const locked = await redis.get(KEY_SPIN_LOCK).catch(() => null);
+  if (locked) {
+    throw new Error("scan_blocked_during_spin");
+  }
+
   await redis.set(KEY_SCAN_STATUS, "scanning");
 
   const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
@@ -578,21 +773,16 @@ async function runScanMembers() {
 
     const h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
     if (!h) continue;
+
     if (String(h.removed || "0") === "1") {
       skippedRemoved += 1;
       continue;
     }
 
     const ok = await isChannelMember(id);
-    if (ok) {
-      await redis.hset(KEY_MEMBER_HASH(id), {
-        active: "1",
-        left_at: "",
-        left_reason: "",
-        last_scan_at: nowISO(),
-      });
-      activeCount += 1;
-    } else {
+    const wasActive = String(h.active ?? "1") === "1";
+
+    if (!ok) {
       await redis.hset(KEY_MEMBER_HASH(id), {
         active: "0",
         left_at: nowISO(),
@@ -601,6 +791,18 @@ async function runScanMembers() {
       });
       await redis.srem(KEY_POOL_SET, id);
       leftCount += 1;
+      continue;
+    }
+
+    /* channel member exists
+       DO NOT auto-restore inactive members here
+       only keep active ones active; inactive stays inactive until re-register */
+    await redis.hset(KEY_MEMBER_HASH(id), {
+      last_scan_at: nowISO(),
+    });
+
+    if (wasActive) {
+      activeCount += 1;
     }
   }
 
@@ -640,6 +842,8 @@ app.get("/health", async (req, res) => {
   try {
     res.json({
       ok: true,
+      prefix: KEY_PREFIX,
+      legacy_prefixes: LEGACY_PREFIX_LIST,
       members: Number((await redis.scard(KEY_MEMBERS_SET)) || 0),
       winners: Number((await redis.scard(KEY_WINNERS_SET)) || 0),
       pool: Number((await redis.scard(KEY_POOL_SET)) || 0),
@@ -691,24 +895,35 @@ app.post("/config/prizes", requireApiKey, async (req, res) => {
 app.get("/members", requireApiKey, async (req, res) => {
   try {
     const includeRemoved = String(req.query.include_removed || "0") === "1";
+    const doBackfill = String(req.query.backfill || "1") === "1";
+
     const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
     const cleanIds = ids.map(String).filter((id) => id && !isExcludedUser(id));
-    const hashes = await Promise.all(cleanIds.map((id) => redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null)));
+
     const winnersArr = (await redis.smembers(KEY_WINNERS_SET)) || [];
     const winnersSet = new Set(winnersArr.map(String));
 
     const members = [];
-    for (let i = 0; i < cleanIds.length; i++) {
-      const id = String(cleanIds[i]);
-      const h = hashes[i];
+    for (const id of cleanIds) {
+      let h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
       if (!h) continue;
 
       const removed = String(h.removed || "0") === "1";
       if (removed && !includeRemoved) continue;
 
-      const name = String(h.name || "").trim();
-      const username = String(h.username || "").trim().replace(/^@+/, "");
-      const display = String(h.display || "").trim() || deriveDisplay(name, username, id);
+      let name = String(h.name || "").trim();
+      let username = String(h.username || "").trim().replace(/^@+/, "");
+      let display = String(h.display || "").trim();
+
+      if (doBackfill && (!name || !username || !display)) {
+        await maybeBackfillMemberIdentity(id);
+        h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => h);
+        name = String(h?.name || "").trim();
+        username = String(h?.username || "").trim().replace(/^@+/, "");
+        display = String(h?.display || "").trim();
+      }
+
+      display = display || deriveDisplay(name, username, id);
       const active = String(h.active ?? "1") === "1";
       const status = removed ? "removed" : active ? "active" : "left";
 
@@ -858,7 +1073,11 @@ app.post("/scan/members", requireApiKey, async (req, res) => {
     res.json({ ok: true, status: "completed", summary });
   } catch (e) {
     await redis.set(KEY_SCAN_STATUS, "error").catch(() => {});
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    const msg = String(e?.message || e);
+    if (msg === "scan_blocked_during_spin") {
+      return res.status(409).json({ ok: false, error: "scan_blocked_during_spin" });
+    }
+    res.status(500).json({ ok: false, error: msg });
   }
 });
 
@@ -1039,6 +1258,16 @@ app.post("/restart-spin", requireApiKey, async (req, res) => {
   }
 });
 
+/* optional manual import endpoint */
+app.post("/members/import-legacy", requireApiKey, async (req, res) => {
+  try {
+    const result = await importLegacyMembers();
+    res.json({ ok: true, ...result, time: nowISO() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 /* ================= Telegram Webhook ================= */
 const WEBHOOK_PATH = `/telegram/${encodeURIComponent(WEBHOOK_SECRET)}`;
 app.post(WEBHOOK_PATH, (req, res) => {
@@ -1179,6 +1408,19 @@ bot.onText(/\/syncmembers$/, async (msg) => {
   }
 });
 
+bot.onText(/\/importlegacy$/, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  try {
+    const r = await importLegacyMembers();
+    bot.sendMessage(
+      msg.chat.id,
+      `Legacy import complete ✅\nImported: ${r.imported}\nMerged: ${r.merged}\nSkipped: ${r.skipped}\nPool: ${r.pool}`
+    );
+  } catch (e) {
+    bot.sendMessage(msg.chat.id, `Import error: ${e?.message || e}`);
+  }
+});
+
 bot.onText(/\/remove(?:\s+([\s\S]+))?/, async (msg) => {
   if (!ownerOnly(msg)) return;
 
@@ -1305,8 +1547,18 @@ async function boot() {
   if (!(await redis.get(KEY_REG_BTN))) await redis.set(KEY_REG_BTN, "");
   if (!(await redis.get(KEY_SCAN_STATUS))) await redis.set(KEY_SCAN_STATUS, "idle");
 
+  const importResult = await importLegacyMembers().catch((e) => {
+    console.error("legacy import error:", e);
+    return null;
+  });
+  if (importResult) {
+    console.log("Legacy import ✅", importResult);
+  }
+
   await setupWebhook();
   console.log("Webhook set ✅", `${PUBLIC_URL}${WEBHOOK_PATH}`);
+  console.log("Current prefix ✅", KEY_PREFIX);
+  console.log("Legacy prefixes ✅", LEGACY_PREFIX_LIST);
 }
 
 const PORT = process.env.PORT || 10000;
