@@ -265,6 +265,7 @@ async function indexMemberIdentity({ id, name, username }) {
   if (n) await redis.set(KEY_NAME_INDEX(n), String(id));
 }
 
+/* optional only */
 async function maybeBackfillMemberIdentity(userId) {
   const uid = String(userId || "");
   if (!uid || !CHANNEL_CHAT) return null;
@@ -274,7 +275,7 @@ async function maybeBackfillMemberIdentity(userId) {
   const prevUsername = String(prev?.username || "").trim().replace(/^@+/, "");
   const prevDisplay = String(prev?.display || "").trim();
 
-  if (prevName && prevUsername && prevDisplay) {
+  if (prevName && prevDisplay) {
     return {
       id: uid,
       name: prevName,
@@ -299,8 +300,6 @@ async function maybeBackfillMemberIdentity(userId) {
       name: cleanName,
       username: cleanUsername,
       display,
-      last_seen_at: String(prev?.last_seen_at || ""),
-      registered_at: String(prev?.registered_at || ""),
       active: String(prev?.active ?? "1"),
       removed: String(prev?.removed || "0"),
       left_at: String(prev?.left_at || ""),
@@ -308,6 +307,8 @@ async function maybeBackfillMemberIdentity(userId) {
       dm_ready: String(prev?.dm_ready || "0"),
       dm_ready_at: String(prev?.dm_ready_at || ""),
       source: String(prev?.source || "backfill"),
+      registered_at: String(prev?.registered_at || ""),
+      last_seen_at: String(prev?.last_seen_at || ""),
       last_scan_at: String(prev?.last_scan_at || ""),
     });
 
@@ -318,7 +319,7 @@ async function maybeBackfillMemberIdentity(userId) {
   }
 }
 
-/* preserve old identity like v2 */
+/* preserve old identity */
 async function saveMember(u, source = "register") {
   const userId = String(u?.id || "");
   if (!userId) return { ok: false, reason: "missing_id" };
@@ -680,7 +681,6 @@ async function rebuildPoolFromCurrentMembers() {
 }
 
 /* ================= Legacy member import ================= */
-/* import members:set even when hash missing */
 async function importLegacyMembers() {
   let imported = 0;
   let merged = 0;
@@ -903,11 +903,11 @@ app.post("/config/prizes", requireApiKey, async (req, res) => {
   }
 });
 
-/* key fix: show even placeholder members */
+/* IMPORTANT FIX: default backfill = 0 */
 app.get("/members", requireApiKey, async (req, res) => {
   try {
     const includeRemoved = String(req.query.include_removed || "1") === "1";
-    const doBackfill = String(req.query.backfill || "1") === "1";
+    const doBackfill = String(req.query.backfill || "0") === "1";
 
     const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
     const cleanIds = ids.map(String).filter((id) => id && !isExcludedUser(id));
@@ -916,6 +916,7 @@ app.get("/members", requireApiKey, async (req, res) => {
     const winnersSet = new Set(winnersArr.map(String));
 
     const members = [];
+
     for (const id of cleanIds) {
       let h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
 
@@ -930,9 +931,11 @@ app.get("/members", requireApiKey, async (req, res) => {
           left_at: "",
           left_reason: "",
           dm_ready: "0",
+          dm_ready_at: "",
           registered_at: "",
           last_seen_at: "",
           last_scan_at: "",
+          source: "placeholder:list",
         };
         await redis.hset(KEY_MEMBER_HASH(id), h).catch(() => {});
       }
@@ -957,7 +960,7 @@ app.get("/members", requireApiKey, async (req, res) => {
       const status = removed ? "removed" : active ? "active" : "left";
 
       members.push({
-        id,
+        id: String(h.id || id),
         name,
         username,
         display,
@@ -970,7 +973,7 @@ app.get("/members", requireApiKey, async (req, res) => {
         registered_at: String(h.registered_at || ""),
         last_seen_at: String(h.last_seen_at || ""),
         last_scan_at: String(h.last_scan_at || ""),
-        isWinner: winnersSet.has(id),
+        isWinner: winnersSet.has(String(h.id || id)),
       });
     }
 
@@ -1431,7 +1434,7 @@ bot.onText(/\/allrestart$/, async (msg) => {
   bot.sendMessage(msg.chat.id, `All restart complete ✅\nPool: ${r.pool}\nPrizes: ${r.remaining_prizes}`);
 });
 
-/* important: syncmembers = identity backfill, not scan */
+/* syncmembers = optional identity backfill only */
 bot.onText(/\/syncmembers$/, async (msg) => {
   if (!ownerOnly(msg)) return;
   if (!CHANNEL_CHAT) return bot.sendMessage(msg.chat.id, "CHANNEL_CHAT မရှိသေးပါ");
