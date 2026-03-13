@@ -340,28 +340,32 @@ async function saveMember(u, source = "register") {
 
   const prevDmReady = String(prev?.dm_ready || "0");
   const prevRegAt = String(prev?.registered_at || "");
+  const prevLastScanAt = String(prev?.last_scan_at || "");
+  const prevActive = String(prev?.active ?? "1");
+  const prevLeftAt = String(prev?.left_at || "");
+  const prevLeftReason = String(prev?.left_reason || "");
 
   await redis.sadd(KEY_MEMBERS_SET, userId);
+
   await redis.hset(KEY_MEMBER_HASH(userId), {
     id: userId,
     name: nextName,
     username: nextUsername,
     display,
-    active: "1",
+    active: prevActive,
     removed: "0",
-    left_at: "",
-    left_reason: "",
+    left_at: prevLeftAt,
+    left_reason: prevLeftReason,
     dm_ready: prevDmReady === "1" ? "1" : "0",
     dm_ready_at: String(prev?.dm_ready_at || ""),
     source: String(source || "register"),
     registered_at: prevRegAt || nowISO(),
     last_seen_at: nowISO(),
-    last_scan_at: String(prev?.last_scan_at || ""),
+    last_scan_at: prevLastScanAt,
   });
 
-  const isWinner = await redis.sismember(KEY_WINNERS_SET, userId);
-  if (!isWinner) await redis.sadd(KEY_POOL_SET, userId);
-  else await redis.srem(KEY_POOL_SET, userId);
+  // register လုပ်တာနဲ့ pool ထဲ auto မထည့်ဘူး
+  await redis.srem(KEY_POOL_SET, userId);
 
   await indexMemberIdentity({ id: userId, name: nextName, username: nextUsername });
   return { ok: true, id: userId };
@@ -783,6 +787,7 @@ async function runScanMembers() {
   let activeCount = 0;
   let leftCount = 0;
   let skippedRemoved = 0;
+  const scannedAt = nowISO();
 
   for (const id of ids.map(String)) {
     if (!id || isExcludedUser(id)) continue;
@@ -792,47 +797,95 @@ async function runScanMembers() {
 
     if (String(h.removed || "0") === "1") {
       skippedRemoved += 1;
+      await redis.srem(KEY_POOL_SET, id);
       continue;
     }
 
     const ok = await isChannelMember(id);
-    const wasActive = String(h.active ?? "1") === "1";
 
     if (!ok) {
       await redis.hset(KEY_MEMBER_HASH(id), {
+        id,
         active: "0",
-        left_at: nowISO(),
+        left_at: scannedAt,
         left_reason: "left_channel",
-        last_scan_at: nowISO(),
+        last_scan_at: scannedAt,
       });
       await redis.srem(KEY_POOL_SET, id);
       leftCount += 1;
       continue;
     }
 
+    // channel ထဲပြန်ရှိနေသူကို active ပြန်လုပ်
     await redis.hset(KEY_MEMBER_HASH(id), {
-      last_scan_at: nowISO(),
+      id,
+      active: "1",
+      removed: "0",
+      left_at: "",
+      left_reason: "",
+      last_scan_at: scannedAt,
     });
 
-    if (wasActive) activeCount += 1;
+    activeCount += 1;
   }
 
   const poolCount = await rebuildPoolFromCurrentMembers();
+
   const summary = {
-    scanned_at: nowISO(),
+    scanned_at: scannedAt,
     active: activeCount,
     left: leftCount,
     skipped_removed: skippedRemoved,
     pool: poolCount,
   };
 
-  await redis.set(KEY_SCAN_LAST_AT, summary.scanned_at);
+  await redis.set(KEY_SCAN_LAST_AT, scannedAt);
   await redis.set(KEY_SCAN_LAST_SUMMARY, JSON.stringify(summary));
   await redis.set(KEY_SCAN_STATUS, "completed");
 
   return summary;
 }
 
+async function resetEventData({ reloadPrizes = true } = {}) {
+  await redis.del(KEY_WINNERS_SET);
+  await redis.del(KEY_HISTORY_LIST);
+  await redis.del(KEY_TURN_SEQ);
+  await redis.del(KEY_POOL_SET);
+  await redis.del(KEY_SPIN_LOCK).catch(() => {});
+
+  // restart ပြီးရင် scan ပြန်လုပ်ရမယ်
+  await redis.set(KEY_SCAN_STATUS, "idle").catch(() => {});
+  await redis.del(KEY_SCAN_LAST_AT).catch(() => {});
+  await redis.del(KEY_SCAN_LAST_SUMMARY).catch(() => {});
+
+  const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
+  const cleanIds = ids.map(String).filter((id) => id && !isExcludedUser(id));
+
+  for (const id of cleanIds) {
+    await redis.del(KEY_WINNER_META(id)).catch(() => {});
+  }
+
+  // member memory မဖျက်ဘူး
+  // active/left record မဖျက်ဘူး
+  // pool ကို scan မလုပ်မချင်း empty ထားမယ်
+
+  if (reloadPrizes) {
+    const raw = await redis.get(KEY_PRIZE_SOURCE);
+    if (raw && String(raw).trim()) {
+      const bag = parsePrizeTextExpand(raw);
+      await redis.del(KEY_PRIZE_BAG);
+      for (const p of bag) await redis.rpush(KEY_PRIZE_BAG, String(p));
+    } else {
+      await redis.del(KEY_PRIZE_BAG);
+    }
+  }
+
+  return {
+    pool: 0,
+    remaining_prizes: Number((await redis.llen(KEY_PRIZE_BAG)) || 0),
+    scan_status: "idle",
+  };
+}
 /* ================= Auth ================= */
 function requireApiKey(req, res, next) {
   const k = req.headers["x-api-key"] || req.query.key;
@@ -840,6 +893,57 @@ function requireApiKey(req, res, next) {
     return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
   next();
+}
+
+function normalizeWinnerLikeItem(raw) {
+  if (!raw || typeof raw !== "object") return null;
+
+  const winner = raw.winner && typeof raw.winner === "object" ? raw.winner : {};
+  const uid = String(
+    winner.id ||
+    raw.user_id ||
+    raw.uid ||
+    raw.id ||
+    ""
+  ).trim();
+
+  const name = String(
+    winner.name ||
+    raw.name ||
+    ""
+  ).trim();
+
+  const username = String(
+    winner.username ||
+    raw.username ||
+    ""
+  ).trim().replace(/^@+/, "");
+
+  const display = String(
+    winner.display ||
+    raw.display ||
+    deriveDisplay(name, username, uid || "-")
+  ).trim();
+
+  const prize = String(raw.prize || raw.reward || "").trim();
+  const at = String(raw.at || raw.time || raw.created_at || "").trim();
+
+  let turnNum = 0;
+  if (Number.isFinite(Number(raw.turn))) {
+    turnNum = Number(raw.turn);
+  }
+
+  return {
+    turn: turnNum,
+    at,
+    prize,
+    winner: {
+      id: uid,
+      name,
+      username,
+      display,
+    },
+  };
 }
 
 /* ================= Express ================= */
@@ -861,7 +965,11 @@ app.get("/health", async (req, res) => {
       remaining_prizes: Number((await redis.llen(KEY_PRIZE_BAG)) || 0),
       scan_status: String((await readMaybe(KEY_SCAN_STATUS)) || "idle"),
       last_scan_at: String((await readMaybe(KEY_SCAN_LAST_AT)) || ""),
-      channel_gate: { enabled: !!CHANNEL_CHAT, chat: CHANNEL_CHAT || null, link: getChannelLink() || null },
+      channel_gate: {
+        enabled: !!CHANNEL_CHAT,
+        chat: CHANNEL_CHAT || null,
+        link: getChannelLink() || null,
+      },
       time: nowISO(),
     });
   } catch (e) {
@@ -890,7 +998,10 @@ app.post("/config/prizes", requireApiKey, async (req, res) => {
     const bag = parsePrizeTextExpand(prizeText);
 
     if (!bag.length) {
-      return res.status(400).json({ ok: false, error: "No valid prizes. Example: 10000Ks 4time" });
+      return res.status(400).json({
+        ok: false,
+        error: "No valid prizes. Example: 10000Ks 4time",
+      });
     }
 
     await redis.del(KEY_PRIZE_BAG);
@@ -1009,14 +1120,43 @@ app.get("/pool", requireApiKey, async (req, res) => {
 app.get("/history", requireApiKey, async (req, res) => {
   try {
     const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
-    const history = (list || []).map((s) => {
+    const history = [];
+
+    for (const s of list || []) {
+      let parsed = null;
       try {
-        return JSON.parse(s);
+        parsed = JSON.parse(s);
       } catch {
-        return { raw: s };
+        parsed = null;
       }
+
+      const normalized = normalizeWinnerLikeItem(parsed);
+      if (normalized) {
+        history.push(normalized);
+        continue;
+      }
+
+      history.push({
+        turn: 0,
+        at: "",
+        prize: "",
+        winner: {
+          id: "",
+          name: "",
+          username: "",
+          display: "-",
+        },
+        raw: String(s || ""),
+      });
+    }
+
+    history.sort((a, b) => Number(b.turn || 0) - Number(a.turn || 0));
+
+    res.json({
+      ok: true,
+      total: history.length,
+      history,
     });
-    res.json({ ok: true, total: history.length, history });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -1025,30 +1165,55 @@ app.get("/history", requireApiKey, async (req, res) => {
 app.get("/winners", requireApiKey, async (req, res) => {
   try {
     const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
-    const items = (list || [])
-      .map((s) => {
-        try {
-          return JSON.parse(s);
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
+    const items = [];
+
+    for (const s of list || []) {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(s);
+      } catch {
+        parsed = null;
+      }
+
+      const normalized = normalizeWinnerLikeItem(parsed);
+      if (normalized) items.push(normalized);
+    }
 
     items.sort((a, b) => Number(a?.turn || 0) - Number(b?.turn || 0));
 
     const out = [];
     for (const it of items) {
-      const uid = String(it?.winner?.id || "");
-      const meta = uid ? await redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({})) : {};
+      const uid = String(it?.winner?.id || "").trim();
+      const meta = uid
+        ? await redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}))
+        : {};
+
+      const name = String(
+        it?.winner?.name ||
+        meta?.name ||
+        ""
+      ).trim();
+
+      const username = String(
+        it?.winner?.username ||
+        meta?.username ||
+        ""
+      ).trim().replace(/^@+/, "");
+
+      const display = String(
+        it?.winner?.display ||
+        meta?.display ||
+        deriveDisplay(name, username, uid || "-")
+      ).trim();
+
       out.push({
         turn: Number(it?.turn || meta?.turn || 0),
         at: String(it?.at || meta?.at || ""),
         prize: String(it?.prize || meta?.prize || ""),
         user_id: uid,
-        name: String(it?.winner?.name || meta?.name || ""),
-        username: String(it?.winner?.username || meta?.username || ""),
-        display: String(it?.winner?.display || meta?.display || uid),
+        name,
+        username,
+        display,
         done: String(meta?.done || "0") === "1",
         done_at: String(meta?.done_at || ""),
         notice_sent: String(meta?.notice_sent || "0") === "1",
@@ -1069,16 +1234,23 @@ app.post("/winner/done", requireApiKey, async (req, res) => {
 
     const metaKey = KEY_WINNER_META(uid);
     const meta = await redis.hgetall(metaKey).catch(() => ({}));
-    if (!meta || !meta.turn) return res.status(404).json({ ok: false, error: "winner_not_found" });
+    if (!meta || !meta.turn) {
+      return res.status(404).json({ ok: false, error: "winner_not_found" });
+    }
 
     const toggle = !!req.body?.toggle;
     const doneIn = req.body?.done;
     let nextDone = String(meta?.done || "0") === "1";
+
     if (toggle) nextDone = !nextDone;
     else if (typeof doneIn === "boolean") nextDone = doneIn;
     else nextDone = true;
 
-    await redis.hset(metaKey, { done: nextDone ? "1" : "0", done_at: nowISO() });
+    await redis.hset(metaKey, {
+      done: nextDone ? "1" : "0",
+      done_at: nowISO(),
+    });
+
     res.json({ ok: true, user_id: uid, done: nextDone });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -1096,6 +1268,7 @@ app.get("/scan/status", requireApiKey, async (req, res) => {
         summary = null;
       }
     }
+
     res.json({
       ok: true,
       status: String((await readMaybe(KEY_SCAN_STATUS)) || "idle"),
@@ -1127,6 +1300,7 @@ app.post("/spin", requireApiKey, async (req, res) => {
     if (locked) {
       return res.status(409).json({ ok: false, error: "spin_in_progress" });
     }
+
     await redis.set(KEY_SPIN_LOCK, nowISO(), { ex: 15 });
 
     const winnerId = await redis.srandmember(KEY_POOL_SET);
@@ -1149,6 +1323,7 @@ app.post("/spin", requireApiKey, async (req, res) => {
     const h = await redis.hgetall(KEY_MEMBER_HASH(String(winnerId))).catch(() => ({}));
     const removed = String(h?.removed || "0") === "1";
     const active = String(h?.active ?? "1") === "1";
+
     if (removed || !active) {
       await redis.srem(KEY_POOL_SET, String(winnerId));
       await redis.del(KEY_SPIN_LOCK).catch(() => {});
@@ -1181,6 +1356,7 @@ app.post("/spin", requireApiKey, async (req, res) => {
 
     await redis.lpush(KEY_HISTORY_LIST, JSON.stringify(item));
     await redis.ltrim(KEY_HISTORY_LIST, 0, 200);
+
     await redis.hset(KEY_WINNER_META(String(winnerId)), {
       user_id: String(winnerId),
       turn: String(turn),
@@ -1237,54 +1413,21 @@ app.post("/notice", requireApiKey, async (req, res) => {
       }).catch(() => {});
     }
 
-    res.json({ ok: true, dm_ok: dm.ok, dm_error: dm.ok ? "" : String(dm.error || "") });
+    res.json({
+      ok: true,
+      dm_ok: dm.ok,
+      dm_error: dm.ok ? "" : String(dm.error || ""),
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-async function resetEventData({ reloadPrizes = true } = {}) {
-  await redis.del(KEY_WINNERS_SET);
-  await redis.del(KEY_HISTORY_LIST);
-  await redis.del(KEY_TURN_SEQ);
-  await redis.del(KEY_POOL_SET);
-  await redis.del(KEY_SPIN_LOCK).catch(() => {});
-
-  const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
-  const cleanIds = ids.map(String).filter((id) => id && !isExcludedUser(id));
-
-  for (const id of cleanIds) {
-    await redis.del(KEY_WINNER_META(id)).catch(() => {});
-  }
-
-  for (const id of cleanIds) {
-    const h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
-    if (!h) continue;
-    if (String(h.removed || "0") === "1") continue;
-    if (String(h.active ?? "1") !== "1") continue;
-    await redis.sadd(KEY_POOL_SET, id);
-  }
-
-  if (reloadPrizes) {
-    const raw = await redis.get(KEY_PRIZE_SOURCE);
-    if (raw && String(raw).trim()) {
-      const bag = parsePrizeTextExpand(raw);
-      await redis.del(KEY_PRIZE_BAG);
-      for (const p of bag) await redis.rpush(KEY_PRIZE_BAG, String(p));
-    } else {
-      await redis.del(KEY_PRIZE_BAG);
-    }
-  }
-
-  return {
-    pool: Number((await redis.scard(KEY_POOL_SET)) || 0),
-    remaining_prizes: Number((await redis.llen(KEY_PRIZE_BAG)) || 0),
-  };
-}
-
 app.post("/event/reset", requireApiKey, async (req, res) => {
   try {
-    const result = await resetEventData({ reloadPrizes: req.body?.reload_prizes !== false });
+    const result = await resetEventData({
+      reloadPrizes: req.body?.reload_prizes !== false,
+    });
     res.json({ ok: true, ...result, time: nowISO() });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -1308,7 +1451,6 @@ app.post("/members/import-legacy", requireApiKey, async (req, res) => {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
-
 /* ================= Telegram Webhook ================= */
 const WEBHOOK_PATH = `/telegram/${encodeURIComponent(WEBHOOK_SECRET)}`;
 app.post(WEBHOOK_PATH, (req, res) => {
@@ -1431,7 +1573,10 @@ bot.onText(/\/status$/, async (msg) => {
 bot.onText(/\/allrestart$/, async (msg) => {
   if (!ownerOnly(msg)) return;
   const r = await resetEventData({ reloadPrizes: true });
-  bot.sendMessage(msg.chat.id, `All restart complete ✅\nPool: ${r.pool}\nPrizes: ${r.remaining_prizes}`);
+  bot.sendMessage(
+    msg.chat.id,
+    `All restart complete ✅\nPool: ${r.pool}\nPrizes: ${r.remaining_prizes}`
+  );
 });
 
 /* syncmembers = optional identity backfill only */
@@ -1505,7 +1650,10 @@ bot.on("callback_query", async (q) => {
     if (data.startsWith("chkch:")) {
       const expectedUserId = data.split(":")[1] || "";
       if (fromId !== String(expectedUserId)) {
-        await bot.answerCallbackQuery(q.id, { text: "ဒီခလုတ်က သင့်အတွက်မဟုတ်ပါ။", show_alert: true });
+        await bot.answerCallbackQuery(q.id, {
+          text: "ဒီခလုတ်က သင့်အတွက်မဟုတ်ပါ။",
+          show_alert: true,
+        });
         return;
       }
 
@@ -1624,3 +1772,4 @@ app.listen(PORT, "0.0.0.0", async () => {
     console.error("Boot error:", e);
   }
 });
+
