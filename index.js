@@ -1123,32 +1123,20 @@ app.get("/history", requireApiKey, async (req, res) => {
     const history = [];
 
     for (const s of list || []) {
-      let parsed = null;
-      try {
-        parsed = JSON.parse(s);
-      } catch {
-        parsed = null;
-      }
+  if (!s || String(s) === "[object Object]") continue;
 
-      const normalized = normalizeWinnerLikeItem(parsed);
-      if (normalized) {
-        history.push(normalized);
-        continue;
-      }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(s);
+  } catch {
+    continue;
+  }
 
-      history.push({
-        turn: 0,
-        at: "",
-        prize: "",
-        winner: {
-          id: "",
-          name: "",
-          username: "",
-          display: "-",
-        },
-        raw: String(s || ""),
-      });
-    }
+  const normalized = normalizeWinnerLikeItem(parsed);
+  if (normalized) {
+    history.push(normalized);
+  }
+}
 
     history.sort((a, b) => Number(b.turn || 0) - Number(a.turn || 0));
 
@@ -1168,16 +1156,18 @@ app.get("/winners", requireApiKey, async (req, res) => {
     const items = [];
 
     for (const s of list || []) {
-      let parsed = null;
-      try {
-        parsed = JSON.parse(s);
-      } catch {
-        parsed = null;
-      }
+  if (!s || String(s) === "[object Object]") continue;
 
-      const normalized = normalizeWinnerLikeItem(parsed);
-      if (normalized) items.push(normalized);
-    }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(s);
+  } catch {
+    continue;
+  }
+
+  const normalized = normalizeWinnerLikeItem(parsed);
+  if (normalized) items.push(normalized);
+}
 
     items.sort((a, b) => Number(a?.turn || 0) - Number(b?.turn || 0));
 
