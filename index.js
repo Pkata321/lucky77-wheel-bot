@@ -784,49 +784,60 @@ async function runScanMembers() {
   await redis.set(KEY_SCAN_STATUS, "scanning");
 
   const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
+  const cleanIds = ids.map(String).filter((id) => id && !isExcludedUser(id));
+
   let activeCount = 0;
   let leftCount = 0;
   let skippedRemoved = 0;
   const scannedAt = nowISO();
 
-  for (const id of ids.map(String)) {
-    if (!id || isExcludedUser(id)) continue;
+  const chunkSize = 10;
 
-    const h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
-    if (!h) continue;
+  for (let i = 0; i < cleanIds.length; i += chunkSize) {
+    const chunk = cleanIds.slice(i, i + chunkSize);
 
-    if (String(h.removed || "0") === "1") {
-      skippedRemoved += 1;
-      await redis.srem(KEY_POOL_SET, id);
-      continue;
+    const results = await Promise.all(
+      chunk.map(async (id) => {
+        const h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
+        if (!h) return { type: "skip" };
+
+        if (String(h.removed || "0") === "1") {
+          await redis.srem(KEY_POOL_SET, id);
+          return { type: "removed" };
+        }
+
+        const ok = await isChannelMember(id);
+
+        if (!ok) {
+          await redis.hset(KEY_MEMBER_HASH(id), {
+            id,
+            active: "0",
+            left_at: scannedAt,
+            left_reason: "left_channel",
+            last_scan_at: scannedAt,
+          });
+          await redis.srem(KEY_POOL_SET, id);
+          return { type: "left" };
+        }
+
+        await redis.hset(KEY_MEMBER_HASH(id), {
+          id,
+          active: "1",
+          removed: "0",
+          left_at: "",
+          left_reason: "",
+          last_scan_at: scannedAt,
+        });
+
+        return { type: "active" };
+      })
+    );
+
+    for (const r of results) {
+      if (r.type === "active") activeCount++;
+      else if (r.type === "left") leftCount++;
+      else if (r.type === "removed") skippedRemoved++;
     }
-
-    const ok = await isChannelMember(id);
-
-    if (!ok) {
-      await redis.hset(KEY_MEMBER_HASH(id), {
-        id,
-        active: "0",
-        left_at: scannedAt,
-        left_reason: "left_channel",
-        last_scan_at: scannedAt,
-      });
-      await redis.srem(KEY_POOL_SET, id);
-      leftCount += 1;
-      continue;
-    }
-
-    // channel ထဲပြန်ရှိနေသူကို active ပြန်လုပ်
-    await redis.hset(KEY_MEMBER_HASH(id), {
-      id,
-      active: "1",
-      removed: "0",
-      left_at: "",
-      left_reason: "",
-      last_scan_at: scannedAt,
-    });
-
-    activeCount += 1;
   }
 
   const poolCount = await rebuildPoolFromCurrentMembers();
@@ -845,7 +856,6 @@ async function runScanMembers() {
 
   return summary;
 }
-
 async function resetEventData({ reloadPrizes = true } = {}) {
   await redis.del(KEY_WINNERS_SET);
   await redis.del(KEY_HISTORY_LIST);
