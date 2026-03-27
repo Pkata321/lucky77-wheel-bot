@@ -364,8 +364,6 @@ async function saveMember(u, source = "register") {
     last_scan_at: prevLastScanAt,
   });
 
-  // register လုပ်တာနဲ့ pool ထဲ auto မထည့်ဘူး
-  await redis.srem(KEY_POOL_SET, userId);
 
   await indexMemberIdentity({ id: userId, name: nextName, username: nextUsername });
   return { ok: true, id: userId };
@@ -376,6 +374,28 @@ async function setDmReady(userId) {
     dm_ready: "1",
     dm_ready_at: nowISO(),
   });
+}
+
+async function addToPoolIfEligible(userId) {
+  const uid = String(userId || "");
+  if (!uid) return { ok: false, reason: "missing_id" };
+  if (isExcludedUser(uid)) return { ok: false, reason: "excluded" };
+
+  const h = await redis.hgetall(KEY_MEMBER_HASH(uid)).catch(() => null);
+  if (!h || !Object.keys(h).length) {
+    return { ok: false, reason: "member_not_found" };
+  }
+
+  const removed = String(h.removed || "0") === "1";
+  const active = String(h.active ?? "1") === "1";
+  const isWinner = await redis.sismember(KEY_WINNERS_SET, uid);
+
+  if (removed) return { ok: false, reason: "removed" };
+  if (!active) return { ok: false, reason: "inactive" };
+  if (isWinner) return { ok: false, reason: "winner" };
+
+  await redis.sadd(KEY_POOL_SET, uid);
+  return { ok: true, id: uid };
 }
 
 async function markInactive(userId, reason = "left_channel") {
@@ -467,8 +487,14 @@ async function sendRegisterDm(chatId) {
 }
 
 async function proceedRegisterAndReply(chatId, user) {
-  await saveMember(user, "private_start");
+  const saved = await saveMember(user, "private_start");
+  if (!saved?.ok) {
+    await bot.sendMessage(chatId, "Register failed.");
+    return;
+  }
+
   await setDmReady(user.id);
+  await addToPoolIfEligible(user.id);
   await sendRegisterDm(chatId);
 }
 
