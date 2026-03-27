@@ -1596,6 +1596,28 @@ bot.onText(/\/status$/, async (msg) => {
   bot.sendMessage(msg.chat.id, t);
 });
 
+bot.onText(/\/scanmembers$/, async (msg) => {
+  if (!ownerOnly(msg)) return;
+
+  try {
+    await bot.sendMessage(msg.chat.id, "Scanning members... ⏳");
+
+    const summary = await runScanMembers();
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `Scan complete ✅\n` +
+      `Active: ${summary.active}\n` +
+      `Left: ${summary.left}\n` +
+      `Skipped removed: ${summary.skipped_removed}\n` +
+      `Pool: ${summary.pool}\n` +
+      `Scanned at: ${summary.scanned_at}`
+    );
+  } catch (e) {
+    bot.sendMessage(msg.chat.id, `Scan error: ${e?.message || e}`);
+  }
+});
+
 bot.onText(/\/allrestart$/, async (msg) => {
   if (!ownerOnly(msg)) return;
   const r = await resetEventData({ reloadPrizes: true });
@@ -1604,7 +1626,6 @@ bot.onText(/\/allrestart$/, async (msg) => {
     `All restart complete ✅\nPool: ${r.pool}\nPrizes: ${r.remaining_prizes}`
   );
 });
-
 /* syncmembers = optional identity backfill only */
 bot.onText(/\/syncmembers$/, async (msg) => {
   if (!ownerOnly(msg)) return;
