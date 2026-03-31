@@ -982,6 +982,35 @@ function normalizeWinnerLikeItem(raw) {
   };
 }
 
+function parseHistoryEntry(raw) {
+  if (!raw) return null;
+
+  let value = raw;
+
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return null;
+
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!value || typeof value !== "object") return null;
+
+  return normalizeWinnerLikeItem(value);
+}
+
 /* ================= Express ================= */
 const app = express();
 app.use(cors());
@@ -1158,21 +1187,10 @@ app.get("/history", requireApiKey, async (req, res) => {
     const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
     const history = [];
 
-    for (const s of list || []) {
-  if (!s || String(s) === "[object Object]") continue;
-
-  let parsed = null;
-  try {
-    parsed = JSON.parse(s);
-  } catch {
-    continue;
-  }
-
-  const normalized = normalizeWinnerLikeItem(parsed);
-  if (normalized) {
-    history.push(normalized);
-  }
-}
+    for (const item of list || []) {
+      const normalized = parseHistoryEntry(item);
+      if (normalized) history.push(normalized);
+    }
 
     history.sort((a, b) => Number(b.turn || 0) - Number(a.turn || 0));
 
@@ -1191,19 +1209,10 @@ app.get("/winners", requireApiKey, async (req, res) => {
     const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
     const items = [];
 
-    for (const s of list || []) {
-  if (!s || String(s) === "[object Object]") continue;
-
-  let parsed = null;
-  try {
-    parsed = JSON.parse(s);
-  } catch {
-    continue;
-  }
-
-  const normalized = normalizeWinnerLikeItem(parsed);
-  if (normalized) items.push(normalized);
-}
+    for (const item of list || []) {
+      const normalized = parseHistoryEntry(item);
+      if (normalized) items.push(normalized);
+    }
 
     items.sort((a, b) => Number(a?.turn || 0) - Number(b?.turn || 0));
 
@@ -1214,22 +1223,12 @@ app.get("/winners", requireApiKey, async (req, res) => {
         ? await redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}))
         : {};
 
-      const name = String(
-        it?.winner?.name ||
-        meta?.name ||
-        ""
-      ).trim();
-
-      const username = String(
-        it?.winner?.username ||
-        meta?.username ||
-        ""
-      ).trim().replace(/^@+/, "");
-
+      const name = String(it?.winner?.name || meta?.name || "").trim();
+      const username = String(it?.winner?.username || meta?.username || "")
+        .trim()
+        .replace(/^@+/, "");
       const display = String(
-        it?.winner?.display ||
-        meta?.display ||
-        deriveDisplay(name, username, uid || "-")
+        it?.winner?.display || meta?.display || deriveDisplay(name, username, uid || "-")
       ).trim();
 
       out.push({
@@ -1245,6 +1244,13 @@ app.get("/winners", requireApiKey, async (req, res) => {
         notice_sent: String(meta?.notice_sent || "0") === "1",
         notice_at: String(meta?.notice_at || ""),
       });
+    }
+
+    res.json({ ok: true, total: out.length, winners: out });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
     }
 
     res.json({ ok: true, total: out.length, winners: out });
