@@ -1251,13 +1251,6 @@ app.get("/winners", requireApiKey, async (req, res) => {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
-    }
-
-    res.json({ ok: true, total: out.length, winners: out });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
 
 app.post("/winner/done", requireApiKey, async (req, res) => {
   try {
