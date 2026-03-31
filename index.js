@@ -1194,67 +1194,69 @@ app.get("/members", requireApiKey, async (req, res) => {
     const winnersArr = (await redis.smembers(KEY_WINNERS_SET)) || [];
     const winnersSet = new Set(winnersArr.map(String));
 
-    const members = [];
+    const memberRows = await Promise.all(
+      cleanIds.map(async (id) => {
+        let h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
 
-    for (const id of cleanIds) {
-      let h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
+        if (!h || !Object.keys(h).length) {
+          h = {
+            id,
+            name: "",
+            username: "",
+            display: String(id),
+            active: "1",
+            removed: "0",
+            left_at: "",
+            left_reason: "",
+            dm_ready: "0",
+            dm_ready_at: "",
+            registered_at: "",
+            last_seen_at: "",
+            last_scan_at: "",
+            source: "placeholder:list",
+          };
+          await redis.hset(KEY_MEMBER_HASH(id), h).catch(() => {});
+        }
 
-      if (!h || !Object.keys(h).length) {
-        h = {
-          id,
-          name: "",
-          username: "",
-          display: String(id),
-          active: "1",
-          removed: "0",
-          left_at: "",
-          left_reason: "",
-          dm_ready: "0",
-          dm_ready_at: "",
-          registered_at: "",
-          last_seen_at: "",
-          last_scan_at: "",
-          source: "placeholder:list",
+        const removed = String(h.removed || "0") === "1";
+        if (removed && !includeRemoved) return null;
+
+        let name = String(h.name || "").trim();
+        let username = String(h.username || "").trim().replace(/^@+/, "");
+        let display = String(h.display || "").trim();
+
+        if (doBackfill && (!name || !display)) {
+          await maybeBackfillMemberIdentity(id);
+          h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => h);
+          name = String(h?.name || "").trim();
+          username = String(h?.username || "").trim().replace(/^@+/, "");
+          display = String(h?.display || "").trim();
+        }
+
+        display = display || deriveDisplay(name, username, id);
+        const active = String(h.active ?? "1") === "1";
+        const status = removed ? "removed" : active ? "active" : "left";
+
+        return {
+          id: String(h.id || id),
+          name,
+          username,
+          display,
+          active,
+          status,
+          removed,
+          left_at: String(h.left_at || ""),
+          left_reason: String(h.left_reason || ""),
+          dm_ready: String(h.dm_ready || "0") === "1",
+          registered_at: String(h.registered_at || ""),
+          last_seen_at: String(h.last_seen_at || ""),
+          last_scan_at: String(h.last_scan_at || ""),
+          isWinner: winnersSet.has(String(h.id || id)),
         };
-        await redis.hset(KEY_MEMBER_HASH(id), h).catch(() => {});
-      }
+      })
+    );
 
-      const removed = String(h.removed || "0") === "1";
-      if (removed && !includeRemoved) continue;
-
-      let name = String(h.name || "").trim();
-      let username = String(h.username || "").trim().replace(/^@+/, "");
-      let display = String(h.display || "").trim();
-
-      if (doBackfill && (!name || !display)) {
-        await maybeBackfillMemberIdentity(id);
-        h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => h);
-        name = String(h?.name || "").trim();
-        username = String(h?.username || "").trim().replace(/^@+/, "");
-        display = String(h?.display || "").trim();
-      }
-
-      display = display || deriveDisplay(name, username, id);
-      const active = String(h.active ?? "1") === "1";
-      const status = removed ? "removed" : active ? "active" : "left";
-
-      members.push({
-        id: String(h.id || id),
-        name,
-        username,
-        display,
-        active,
-        status,
-        removed,
-        left_at: String(h.left_at || ""),
-        left_reason: String(h.left_reason || ""),
-        dm_ready: String(h.dm_ready || "0") === "1",
-        registered_at: String(h.registered_at || ""),
-        last_seen_at: String(h.last_seen_at || ""),
-        last_scan_at: String(h.last_scan_at || ""),
-        isWinner: winnersSet.has(String(h.id || id)),
-      });
-    }
+    const members = memberRows.filter(Boolean);
 
     members.sort((a, b) => {
       const ar = a.registered_at || "";
