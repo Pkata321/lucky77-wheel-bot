@@ -92,6 +92,8 @@ function keysForPrefix(prefix) {
     SCAN_LAST_AT: `${prefix}:scan:last_at`,
     SCAN_LAST_SUMMARY: `${prefix}:scan:last_summary`,
     SPIN_LOCK: `${prefix}:spin:lock`,
+    STOP_FORWARD: (uid) => `${prefix}:stop:forward:${uid}`,
+    
   };
 }
 
@@ -135,6 +137,7 @@ const KEY_SCAN_STATUS = K.SCAN_STATUS;
 const KEY_SCAN_LAST_AT = K.SCAN_LAST_AT;
 const KEY_SCAN_LAST_SUMMARY = K.SCAN_LAST_SUMMARY;
 const KEY_SPIN_LOCK = K.SPIN_LOCK;
+const KEY_STOP_FORWARD = K.STOP_FORWARD;
 
 /* ================= Bot ================= */
 const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
@@ -228,13 +231,21 @@ function getChannelLink() {
 }
 
 async function isChannelMember(userId) {
-  if (!CHANNEL_CHAT) return true;
+  if (!CHANNEL_CHAT) return { ok: true, isMember: true };
+
   try {
     const m = await bot.getChatMember(String(CHANNEL_CHAT), Number(userId));
     const st = String(m?.status || "");
-    return st === "member" || st === "administrator" || st === "creator";
-  } catch (_) {
-    return false;
+    const isMember =
+      st === "member" || st === "administrator" || st === "creator";
+
+    return { ok: true, isMember };
+  } catch (e) {
+    return {
+      ok: false,
+      isMember: false,
+      error: String(e?.message || e),
+    };
   }
 }
 
@@ -690,6 +701,44 @@ function parseRemovePayload(text) {
   return { name, username, id };
 }
 
+function parseStopMessagePayload(text) {
+  const raw = String(text || "").replace(/^\/stopmessage(@\w+)?\s*/i, "").trim();
+  if (!raw) return null;
+
+  const parts = raw.split(/\s+/).filter(Boolean);
+  let username = "";
+  let id = "";
+  const nameTokens = [];
+
+  for (const p of parts) {
+    const low = p.toLowerCase();
+    if (p.startsWith("@") && p.length > 1) {
+      username = p.replace("@", "").trim();
+      continue;
+    }
+    const m = low.match(/^id[:=](\d+)$/);
+    if (m) {
+      id = m[1];
+      continue;
+    }
+    if (!id && /^\d+$/.test(p)) {
+      id = p;
+      continue;
+    }
+    nameTokens.push(p);
+  }
+
+  const name = nameTokens.join(" ").trim();
+  if (!name && !username && !id) return null;
+  return { name, username, id };
+}
+
+async function isForwardStopped(userId) {
+  const v = await readMaybe(KEY_STOP_FORWARD(String(userId)));
+  return !!v;
+}
+
+
 async function rebuildPoolFromCurrentMembers() {
   await redis.del(KEY_POOL_SET);
   const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
@@ -815,6 +864,7 @@ async function runScanMembers() {
   let activeCount = 0;
   let leftCount = 0;
   let skippedRemoved = 0;
+  let unknownCount = 0;
   const scannedAt = nowISO();
 
   const chunkSize = 10;
@@ -832,19 +882,27 @@ async function runScanMembers() {
           return { type: "removed" };
         }
 
-        const ok = await isChannelMember(id);
+        const check = await isChannelMember(id);
 
-        if (!ok) {
-          await redis.hset(KEY_MEMBER_HASH(id), {
-            id,
-            active: "0",
-            left_at: scannedAt,
-            left_reason: "left_channel",
-            last_scan_at: scannedAt,
-          });
-          await redis.srem(KEY_POOL_SET, id);
-          return { type: "left" };
-        }
+if (!check.ok) {
+  await redis.hset(KEY_MEMBER_HASH(id), {
+    id,
+    last_scan_at: scannedAt,
+  });
+  return { type: "unknown" };
+}
+
+if (!check.isMember) {
+  await redis.hset(KEY_MEMBER_HASH(id), {
+    id,
+    active: "0",
+    left_at: scannedAt,
+    left_reason: "left_channel",
+    last_scan_at: scannedAt,
+  });
+  await redis.srem(KEY_POOL_SET, id);
+  return { type: "left" };
+}
 
         await redis.hset(KEY_MEMBER_HASH(id), {
           id,
@@ -860,22 +918,23 @@ async function runScanMembers() {
     );
 
     for (const r of results) {
-      if (r.type === "active") activeCount++;
-      else if (r.type === "left") leftCount++;
-      else if (r.type === "removed") skippedRemoved++;
-    }
+  if (r.type === "active") activeCount++;
+  else if (r.type === "left") leftCount++;
+  else if (r.type === "removed") skippedRemoved++;
+  else if (r.type === "unknown") unknownCount++;
+}
   }
 
   const poolCount = await rebuildPoolFromCurrentMembers();
 
   const summary = {
-    scanned_at: scannedAt,
-    active: activeCount,
-    left: leftCount,
-    skipped_removed: skippedRemoved,
-    pool: poolCount,
-  };
-
+  scanned_at: scannedAt,
+  active: activeCount,
+  left: leftCount,
+  skipped_removed: skippedRemoved,
+  unknown: unknownCount,
+  pool: poolCount,
+};
   await redis.set(KEY_SCAN_LAST_AT, scannedAt);
   await redis.set(KEY_SCAN_LAST_SUMMARY, JSON.stringify(summary));
   await redis.set(KEY_SCAN_STATUS, "completed");
@@ -1009,6 +1068,50 @@ function parseHistoryEntry(raw) {
   if (!value || typeof value !== "object") return null;
 
   return normalizeWinnerLikeItem(value);
+}
+
+async function buildWinnersList() {
+  const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
+  const items = [];
+
+  for (const item of list || []) {
+    const normalized = parseHistoryEntry(item);
+    if (normalized) items.push(normalized);
+  }
+
+  items.sort((a, b) => Number(a?.turn || 0) - Number(b?.turn || 0));
+
+  const out = [];
+  for (const it of items) {
+    const uid = String(it?.winner?.id || "").trim();
+    const meta = uid
+      ? await redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}))
+      : {};
+
+    const name = String(it?.winner?.name || meta?.name || "").trim();
+    const username = String(it?.winner?.username || meta?.username || "")
+      .trim()
+      .replace(/^@+/, "");
+    const display = String(
+      it?.winner?.display || meta?.display || deriveDisplay(name, username, uid || "-")
+    ).trim();
+
+    out.push({
+      turn: Number(it?.turn || meta?.turn || 0),
+      at: String(it?.at || meta?.at || ""),
+      prize: String(it?.prize || meta?.prize || ""),
+      user_id: uid,
+      name,
+      username,
+      display,
+      done: String(meta?.done || "0") === "1",
+      done_at: String(meta?.done_at || ""),
+      notice_sent: String(meta?.notice_sent || "0") === "1",
+      notice_at: String(meta?.notice_at || ""),
+    });
+  }
+
+  return out;
 }
 
 /* ================= Express ================= */
@@ -1206,47 +1309,30 @@ app.get("/history", requireApiKey, async (req, res) => {
 
 app.get("/winners", requireApiKey, async (req, res) => {
   try {
-    const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
-    const items = [];
-
-    for (const item of list || []) {
-      const normalized = parseHistoryEntry(item);
-      if (normalized) items.push(normalized);
-    }
-
-    items.sort((a, b) => Number(a?.turn || 0) - Number(b?.turn || 0));
-
-    const out = [];
-    for (const it of items) {
-      const uid = String(it?.winner?.id || "").trim();
-      const meta = uid
-        ? await redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}))
-        : {};
-
-      const name = String(it?.winner?.name || meta?.name || "").trim();
-      const username = String(it?.winner?.username || meta?.username || "")
-        .trim()
-        .replace(/^@+/, "");
-      const display = String(
-        it?.winner?.display || meta?.display || deriveDisplay(name, username, uid || "-")
-      ).trim();
-
-      out.push({
-        turn: Number(it?.turn || meta?.turn || 0),
-        at: String(it?.at || meta?.at || ""),
-        prize: String(it?.prize || meta?.prize || ""),
-        user_id: uid,
-        name,
-        username,
-        display,
-        done: String(meta?.done || "0") === "1",
-        done_at: String(meta?.done_at || ""),
-        notice_sent: String(meta?.notice_sent || "0") === "1",
-        notice_at: String(meta?.notice_at || ""),
-      });
-    }
-
+    const out = await buildWinnersList();
     res.json({ ok: true, total: out.length, winners: out });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.get("/winners/cs", requireApiKey, async (req, res) => {
+  try {
+    const out = await buildWinnersList();
+
+    const csList = out.map((x) => ({
+      turn: x.turn,
+      at: x.at,
+      prize: x.prize,
+      user_id: x.user_id,
+      name: x.name,
+      username: x.username,
+      display: x.display,
+      done: x.done,
+      done_at: x.done_at,
+    }));
+
+    res.json({ ok: true, total: csList.length, winners: csList });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -1410,8 +1496,8 @@ app.post("/notice", requireApiKey, async (req, res) => {
     if (!user_id) return res.status(400).json({ ok: false, error: "user_id required" });
 
     const uid = String(user_id);
-    const pz = prize ? String(prize) : "";
-
+    const meta = await redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}));
+    const pz = String(prize || meta?.prize || "").trim();
     const msgText =
       text && String(text).trim()
         ? String(text)
@@ -1419,12 +1505,13 @@ app.post("/notice", requireApiKey, async (req, res) => {
           `လက်ကီး77 ရဲ့ လစဉ်ဗလာမပါလက်ကီးဝှီး အစီစဉ်မှာ ယူနစ် ${pz || "—"} ကံထူးသွားပါတယ်ရှင့်☘️\n` +
           "ဂိမ်းယူနစ်လေး ထည့်ပေးဖို့ အကို့ဂိမ်းအကောင့်လေး ပို့ပေးပါရှင့်";
 
-    await redis.set(
-      KEY_NOTICE_CTX(uid),
-      JSON.stringify({ user_id: uid, prize: pz, at: nowISO() }),
-      { ex: 60 * 60 * 24 * 7 }
-    );
+  await redis.set(
+  KEY_NOTICE_CTX(uid),
+  JSON.stringify({ user_id: uid, prize: pz, at: nowISO() }),
+  { ex: 60 * 60 * 24 * 3 }
+);
 
+await redis.del(KEY_STOP_FORWARD(uid)).catch(() => {});
     const dm = await bot
       .sendMessage(Number(uid), msgText)
       .then(() => ({ ok: true }))
@@ -1604,14 +1691,15 @@ bot.onText(/\/scanmembers$/, async (msg) => {
     const summary = await runScanMembers();
 
     await bot.sendMessage(
-      msg.chat.id,
-      `Scan complete ✅\n` +
-      `Active: ${summary.active}\n` +
-      `Left: ${summary.left}\n` +
-      `Skipped removed: ${summary.skipped_removed}\n` +
-      `Pool: ${summary.pool}\n` +
-      `Scanned at: ${summary.scanned_at}`
-    );
+  msg.chat.id,
+  `Scan complete ✅\n` +
+  `Active: ${summary.active}\n` +
+  `Left: ${summary.left}\n` +
+  `Skipped removed: ${summary.skipped_removed}\n` +
+  `Unknown: ${summary.unknown}\n` +
+  `Pool: ${summary.pool}\n` +
+  `Scanned at: ${summary.scanned_at}`
+);
   } catch (e) {
     bot.sendMessage(msg.chat.id, `Scan error: ${e?.message || e}`);
   }
@@ -1679,6 +1767,22 @@ bot.onText(/\/remove(?:\s+([\s\S]+))?/, async (msg) => {
   bot.sendMessage(msg.chat.id, `Member removed: ${uid}`);
 });
 
+bot.onText(/\/stopmessage(?:\s+([\s\S]+))?/, async (msg) => {
+  if (!ownerOnly(msg)) return;
+
+  const payload = parseStopMessagePayload(msg.text || "");
+  if (!payload) {
+    return bot.sendMessage(msg.chat.id, "Usage: /stopmessage <name|username|id>");
+  }
+
+  const uid = await resolveMemberIdForAny(payload);
+  if (!uid) return bot.sendMessage(msg.chat.id, "Member not found");
+
+  await redis.set(KEY_STOP_FORWARD(uid), "1", { ex: 60 * 60 * 24 * 3 });
+
+  bot.sendMessage(msg.chat.id, `Stop forward enabled for 3 days: ${uid}`);
+});
+
 /* ================= CALLBACKS ================= */
 bot.on("callback_query", async (q) => {
   try {
@@ -1694,25 +1798,35 @@ bot.on("callback_query", async (q) => {
     }
 
     if (data.startsWith("chkch:")) {
-      const expectedUserId = data.split(":")[1] || "";
-      if (fromId !== String(expectedUserId)) {
-        await bot.answerCallbackQuery(q.id, {
-          text: "ဒီခလုတ်က သင့်အတွက်မဟုတ်ပါ။",
-          show_alert: true,
-        });
-        return;
-      }
+  const expectedUserId = data.split(":")[1] || "";
+  if (fromId !== String(expectedUserId)) {
+    await bot.answerCallbackQuery(q.id, {
+      text: "ဒီခလုတ်က သင့်အတွက်မဟုတ်ပါ။",
+      show_alert: true,
+    });
+    return;
+  }
 
-      await bot.answerCallbackQuery(q.id);
-      const ok = await isChannelMember(fromId);
-      if (!ok) {
-        await sendJoinGate(chatId, fromId);
-        return;
-      }
+  const check = await isChannelMember(fromId);
 
-      await proceedRegisterAndReply(chatId, q.from);
-      return;
-    }
+  if (!check.ok) {
+    await bot.answerCallbackQuery(q.id, {
+      text: "Channel check ခဏမအောင်မြင်ပါ။ ထပ်စမ်းပါ။",
+      show_alert: true,
+    });
+    return;
+  }
+
+  await bot.answerCallbackQuery(q.id);
+
+  if (!check.isMember) {
+    await sendJoinGate(chatId, fromId);
+    return;
+  }
+
+  await proceedRegisterAndReply(chatId, q.from);
+  return;
+}
 
     await bot.answerCallbackQuery(q.id).catch(() => {});
   } catch (e) {
@@ -1726,10 +1840,14 @@ bot.on("message", async (msg) => {
     if (!msg || !msg.chat || !msg.from) return;
     if (String(msg.chat.type) !== "private") return;
     if (isOwner(msg.from.id)) return;
+    if (msg.text && msg.text.startsWith("/")) return;
 
     const uid = String(msg.from.id);
     const ctxRaw = await redis.get(KEY_NOTICE_CTX(uid));
     if (!ctxRaw) return;
+
+    const stopped = await isForwardStopped(uid);
+    if (stopped) return;
 
     let ctx = {};
     try {
@@ -1742,7 +1860,8 @@ bot.on("message", async (msg) => {
       `• Name: ${name || "-"}\n` +
       `• Username: ${username ? "@" + username.replace(/^@+/, "") : "-"}\n` +
       `• ID: ${uid}\n` +
-      `• Prize: ${ctx?.prize || "-"}`;
+      `• Prize: ${ctx?.prize || "-"}\n` +
+      `• At: ${ctx?.at || "-"}`;
 
     await bot.sendMessage(Number(OWNER_ID), header).catch(() => {});
     await bot.forwardMessage(Number(OWNER_ID), msg.chat.id, msg.message_id).catch(() => {});
@@ -1750,7 +1869,6 @@ bot.on("message", async (msg) => {
     console.error("message handler error:", e);
   }
 });
-
 /* ================= /start register ================= */
 bot.onText(/^\/start(?:\s+(.+))?/i, async (msg) => {
   try {
@@ -1759,12 +1877,21 @@ bot.onText(/^\/start(?:\s+(.+))?/i, async (msg) => {
     if (!u) return;
 
     if (CHANNEL_CHAT) {
-      const ok = await isChannelMember(u.id);
-      if (!ok) {
-        await sendJoinGate(msg.chat.id, u.id);
-        return;
-      }
-    }
+  const check = await isChannelMember(u.id);
+
+  if (!check.ok) {
+    await bot.sendMessage(
+      msg.chat.id,
+      "Channel member check ခဏမအောင်မြင်ပါ။ နောက်တစ်ခါပြန်စမ်းပါ။"
+    );
+    return;
+  }
+
+  if (!check.isMember) {
+    await sendJoinGate(msg.chat.id, u.id);
+    return;
+  }
+}
 
     await proceedRegisterAndReply(msg.chat.id, u);
   } catch (e) {
