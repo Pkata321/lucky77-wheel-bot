@@ -1276,26 +1276,6 @@ app.get("/members", requireApiKey, async (req, res) => {
   }
 });
 
-    members.sort((a, b) => {
-      const ar = a.registered_at || "";
-      const br = b.registered_at || "";
-      if (ar && br) return ar.localeCompare(br);
-      if (ar) return -1;
-      if (br) return 1;
-      return String(a.id).localeCompare(String(b.id));
-    });
-
-    res.json({
-      ok: true,
-      total: members.length,
-      last_scan_at: String((await readMaybe(KEY_SCAN_LAST_AT)) || ""),
-      members,
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
 app.get("/pool", requireApiKey, async (req, res) => {
   try {
     const ids = (await redis.smembers(KEY_POOL_SET)) || [];
