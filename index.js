@@ -1071,34 +1071,42 @@ function parseHistoryEntry(raw) {
 }
 
 async function buildWinnersList() {
-  const list = await redis.lrange(KEY_HISTORY_LIST, 0, -1);
-  const items = [];
+  const winnerIds = (await redis.smembers(KEY_WINNERS_SET)) || [];
+  const cleanWinnerIds = winnerIds.map(String).filter(Boolean);
 
-  for (const item of list || []) {
+  const historyList = await redis.lrange(KEY_HISTORY_LIST, 0, -1);
+  const historyItems = [];
+
+  for (const item of historyList || []) {
     const normalized = parseHistoryEntry(item);
-    if (normalized) items.push(normalized);
+    if (normalized) historyItems.push(normalized);
   }
 
-  items.sort((a, b) => Number(a?.turn || 0) - Number(b?.turn || 0));
+  const historyMap = new Map();
+  for (const it of historyItems) {
+    const uid = String(it?.winner?.id || "").trim();
+    if (!uid) continue;
+    if (!historyMap.has(uid)) {
+      historyMap.set(uid, it);
+    }
+  }
 
   const metaList = await Promise.all(
-    items.map((it) => {
-      const uid = String(it?.winner?.id || "").trim();
-      if (!uid) return {};
-      return redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}));
-    })
+    cleanWinnerIds.map((uid) =>
+      redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}))
+    )
   );
 
-  const out = items.map((it, i) => {
-    const uid = String(it?.winner?.id || "").trim();
+  const out = cleanWinnerIds.map((uid, i) => {
     const meta = metaList[i] || {};
+    const it = historyMap.get(uid) || null;
 
     const name = String(it?.winner?.name || meta?.name || "").trim();
     const username = String(it?.winner?.username || meta?.username || "")
       .trim()
       .replace(/^@+/, "");
     const display = String(
-      it?.winner?.display || meta?.display || deriveDisplay(name, username, uid || "-")
+      it?.winner?.display || meta?.display || deriveDisplay(name, username, uid)
     ).trim();
 
     return {
@@ -1116,6 +1124,7 @@ async function buildWinnersList() {
     };
   });
 
+  out.sort((a, b) => Number(a.turn || 0) - Number(b.turn || 0));
   return out;
 }
 
