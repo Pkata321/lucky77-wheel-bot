@@ -1086,7 +1086,9 @@ async function buildWinnersList() {
   for (const it of historyItems) {
     const uid = String(it?.winner?.id || "").trim();
     if (!uid) continue;
-    if (!historyMap.has(uid)) {
+
+    const current = historyMap.get(uid);
+    if (!current || Number(it?.turn || 0) > Number(current?.turn || 0)) {
       historyMap.set(uid, it);
     }
   }
