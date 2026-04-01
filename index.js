@@ -1071,7 +1071,7 @@ function parseHistoryEntry(raw) {
 }
 
 async function buildWinnersList() {
-  const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
+  const list = await redis.lrange(KEY_HISTORY_LIST, 0, -1);
   const items = [];
 
   for (const item of list || []) {
@@ -1289,7 +1289,7 @@ app.get("/pool", requireApiKey, async (req, res) => {
 
 app.get("/history", requireApiKey, async (req, res) => {
   try {
-    const list = await redis.lrange(KEY_HISTORY_LIST, 0, 200);
+   await redis.ltrim(KEY_HISTORY_LIST, 0, 9999);
     const history = [];
 
     for (const item of list || []) {
@@ -1332,6 +1332,8 @@ app.get("/winners/cs", requireApiKey, async (req, res) => {
       display: x.display,
       done: x.done,
       done_at: x.done_at,
+      notice_sent: x.notice_sent,
+      notice_at: x.notice_at,
     }));
 
     res.json({ ok: true, total: csList.length, winners: csList });
