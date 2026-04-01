@@ -1289,7 +1289,7 @@ app.get("/pool", requireApiKey, async (req, res) => {
 
 app.get("/history", requireApiKey, async (req, res) => {
   try {
-   await redis.ltrim(KEY_HISTORY_LIST, 0, 9999);
+    const list = await redis.lrange(KEY_HISTORY_LIST, 0, -1);
     const history = [];
 
     for (const item of list || []) {
@@ -1470,7 +1470,7 @@ app.post("/spin", requireApiKey, async (req, res) => {
     };
 
     await redis.lpush(KEY_HISTORY_LIST, JSON.stringify(item));
-    await redis.ltrim(KEY_HISTORY_LIST, 0, 200);
+// await redis.ltrim(KEY_HISTORY_LIST, 0, 9999);
 
     await redis.hset(KEY_WINNER_META(String(winnerId)), {
       user_id: String(winnerId),
