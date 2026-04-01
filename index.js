@@ -1070,8 +1070,9 @@ function parseHistoryEntry(raw) {
   return normalizeWinnerLikeItem(value);
 }
 
-async function buildWinnersList() {
-  const list = await redis.lrange(KEY_HISTORY_LIST, 0, -1);
+async function buildWinnersList(limit = 500) {
+  const safeLimit = Math.min(Math.max(Number(limit || 500), 1), 2000);
+  const list = await redis.lrange(KEY_HISTORY_LIST, 0, safeLimit - 1);
   const items = [];
 
   for (const item of list || []) {
@@ -1081,12 +1082,17 @@ async function buildWinnersList() {
 
   items.sort((a, b) => Number(a?.turn || 0) - Number(b?.turn || 0));
 
-  const out = [];
-  for (const it of items) {
+  const metaList = await Promise.all(
+    items.map((it) => {
+      const uid = String(it?.winner?.id || "").trim();
+      if (!uid) return Promise.resolve({});
+      return redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}));
+    })
+  );
+
+  return items.map((it, i) => {
     const uid = String(it?.winner?.id || "").trim();
-    const meta = uid
-      ? await redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}))
-      : {};
+    const meta = metaList[i] || {};
 
     const name = String(it?.winner?.name || meta?.name || "").trim();
     const username = String(it?.winner?.username || meta?.username || "")
@@ -1096,7 +1102,7 @@ async function buildWinnersList() {
       it?.winner?.display || meta?.display || deriveDisplay(name, username, uid || "-")
     ).trim();
 
-    out.push({
+    return {
       turn: Number(it?.turn || meta?.turn || 0),
       at: String(it?.at || meta?.at || ""),
       prize: String(it?.prize || meta?.prize || ""),
@@ -1108,8 +1114,9 @@ async function buildWinnersList() {
       done_at: String(meta?.done_at || ""),
       notice_sent: String(meta?.notice_sent || "0") === "1",
       notice_at: String(meta?.notice_at || ""),
-    });
-  }
+    };
+  });
+}
 
   return out;
 }
@@ -1309,10 +1316,26 @@ app.get("/history", requireApiKey, async (req, res) => {
   }
 });
 
-app.get("/winners", requireApiKey, async (req, res) => {
+app.get("/winners/cs", requireApiKey, async (req, res) => {
   try {
-    const out = await buildWinnersList();
-    res.json({ ok: true, total: out.length, winners: out });
+    const limit = Math.min(Number(req.query.limit || 500), 2000);
+    const out = await buildWinnersList(limit);
+
+    const csList = out.map((x) => ({
+      turn: x.turn,
+      at: x.at,
+      prize: x.prize,
+      user_id: x.user_id,
+      name: x.name,
+      username: x.username,
+      display: x.display,
+      done: x.done,
+      done_at: x.done_at,
+      notice_sent: x.notice_sent,
+      notice_at: x.notice_at,
+    }));
+
+    res.json({ ok: true, total: csList.length, winners: csList });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
