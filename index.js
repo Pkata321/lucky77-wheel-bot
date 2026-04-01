@@ -1070,9 +1070,8 @@ function parseHistoryEntry(raw) {
   return normalizeWinnerLikeItem(value);
 }
 
-async function buildWinnersList(limit = 500) {
-  const safeLimit = Math.min(Math.max(Number(limit || 500), 1), 2000);
-  const list = await redis.lrange(KEY_HISTORY_LIST, 0, safeLimit - 1);
+async function buildWinnersList() {
+  const list = await redis.lrange(KEY_HISTORY_LIST, 0, -1);
   const items = [];
 
   for (const item of list || []) {
@@ -1085,12 +1084,12 @@ async function buildWinnersList(limit = 500) {
   const metaList = await Promise.all(
     items.map((it) => {
       const uid = String(it?.winner?.id || "").trim();
-      if (!uid) return Promise.resolve({});
+      if (!uid) return {};
       return redis.hgetall(KEY_WINNER_META(uid)).catch(() => ({}));
     })
   );
 
-  return items.map((it, i) => {
+  const out = items.map((it, i) => {
     const uid = String(it?.winner?.id || "").trim();
     const meta = metaList[i] || {};
 
@@ -1116,7 +1115,6 @@ async function buildWinnersList(limit = 500) {
       notice_at: String(meta?.notice_at || ""),
     };
   });
-}
 
   return out;
 }
