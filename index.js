@@ -1314,26 +1314,10 @@ app.get("/history", requireApiKey, async (req, res) => {
   }
 });
 
-app.get("/winners/cs", requireApiKey, async (req, res) => {
+app.get("/winners", requireApiKey, async (req, res) => {
   try {
-    const limit = Math.min(Number(req.query.limit || 500), 2000);
-    const out = await buildWinnersList(limit);
-
-    const csList = out.map((x) => ({
-      turn: x.turn,
-      at: x.at,
-      prize: x.prize,
-      user_id: x.user_id,
-      name: x.name,
-      username: x.username,
-      display: x.display,
-      done: x.done,
-      done_at: x.done_at,
-      notice_sent: x.notice_sent,
-      notice_at: x.notice_at,
-    }));
-
-    res.json({ ok: true, total: csList.length, winners: csList });
+    const out = await buildWinnersList();
+    res.json({ ok: true, total: out.length, winners: out });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
