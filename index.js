@@ -1132,7 +1132,18 @@ async function buildWinnersList() {
 
 /* ================= Express ================= */
 const app = express();
-app.use(cors());
+const allowedOrigins = String(process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((x) => x.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error("CORS origin not allowed"));
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: "6mb" }));
 
 app.get("/", (req, res) => res.send("Lucky77 Wheel Bot ✅"));
@@ -1427,12 +1438,10 @@ app.post("/scan/members", requireApiKey, async (req, res) => {
 
 app.post("/spin", requireApiKey, async (req, res) => {
   try {
-    const locked = await redis.get(KEY_SPIN_LOCK).catch(() => null);
-    if (locked) {
+    const lockOk = await redis.set(KEY_SPIN_LOCK, nowISO(), { nx: true, ex: 15 }).catch(() => null);
+    if (!lockOk) {
       return res.status(409).json({ ok: false, error: "spin_in_progress" });
     }
-
-    await redis.set(KEY_SPIN_LOCK, nowISO(), { ex: 15 });
 
     const winnerId = await redis.srandmember(KEY_POOL_SET);
     if (!winnerId) {
