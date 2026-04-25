@@ -941,7 +941,48 @@ if (!check.isMember) {
 
   return summary;
 }
+async function reloadPrizeBagFromSource() {
+  const raw = await redis.get(KEY_PRIZE_SOURCE);
+  await redis.del(KEY_PRIZE_BAG);
+  if (raw && String(raw).trim()) {
+    const bag = parsePrizeTextExpand(raw);
+    for (const p of bag) await redis.rpush(KEY_PRIZE_BAG, String(p));
+  }
+  return Number((await redis.llen(KEY_PRIZE_BAG)) || 0);
+}
+
+async function prizeReloadOnly() {
+  const remaining = await reloadPrizeBagFromSource();
+  await redis.del(KEY_SPIN_LOCK).catch(() => {});
+  return {
+    mode: "prize_reload",
+    pool: Number((await redis.scard(KEY_POOL_SET)) || 0),
+    winners: Number((await redis.scard(KEY_WINNERS_SET)) || 0),
+    remaining_prizes: remaining,
+    scan_status: String((await readMaybe(KEY_SCAN_STATUS)) || "idle"),
+  };
+}
+
+async function safeRestartEventData() {
+  await redis.del(KEY_WINNERS_SET);
+  await redis.del(KEY_HISTORY_LIST);
+  await redis.del(KEY_TURN_SEQ);
+  await redis.del(KEY_SPIN_LOCK).catch(() => {});
+  const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
+  const cleanIds = ids.map(String).filter((id) => id && !isExcludedUser(id));
+  for (const id of cleanIds) {
+    await redis.del(KEY_WINNER_META(id)).catch(() => {});
+  }
+  const pool = await rebuildPoolFromCurrentMembers();
+  const remaining = await reloadPrizeBagFromSource();
+  await redis.set(KEY_SCAN_STATUS, "completed").catch(() => {});
+  await redis.set(KEY_SCAN_LAST_AT, nowISO()).catch(() => {});
+  await redis.set(KEY_SCAN_LAST_SUMMARY, JSON.stringify({ safe_restart: true, pool, active: pool, left: 0, skipped_removed: 0, unknown: 0 })).catch(() => {});
+  return { mode: "safe_restart", pool, winners: 0, remaining_prizes: remaining, scan_status: "completed" };
+}
+
 async function resetEventData({ reloadPrizes = true } = {}) {
+
   await redis.del(KEY_WINNERS_SET);
   await redis.del(KEY_HISTORY_LIST);
   await redis.del(KEY_TURN_SEQ);
@@ -965,17 +1006,11 @@ async function resetEventData({ reloadPrizes = true } = {}) {
   // pool ကို scan မလုပ်မချင်း empty ထားမယ်
 
   if (reloadPrizes) {
-    const raw = await redis.get(KEY_PRIZE_SOURCE);
-    if (raw && String(raw).trim()) {
-      const bag = parsePrizeTextExpand(raw);
-      await redis.del(KEY_PRIZE_BAG);
-      for (const p of bag) await redis.rpush(KEY_PRIZE_BAG, String(p));
-    } else {
-      await redis.del(KEY_PRIZE_BAG);
-    }
+    await reloadPrizeBagFromSource();
   }
 
   return {
+    mode: "full_reset",
     pool: 0,
     remaining_prizes: Number((await redis.llen(KEY_PRIZE_BAG)) || 0),
     scan_status: "idle",
@@ -1564,11 +1599,16 @@ await redis.del(KEY_STOP_FORWARD(uid)).catch(() => {});
   }
 });
 
+async function runRestartMode(req) {
+  const mode = String(req.body?.mode || "safe_restart").trim();
+  if (mode === "prize_reload") return prizeReloadOnly();
+  if (mode === "full_reset") return resetEventData({ reloadPrizes: req.body?.reload_prizes !== false });
+  return safeRestartEventData();
+}
+
 app.post("/event/reset", requireApiKey, async (req, res) => {
   try {
-    const result = await resetEventData({
-      reloadPrizes: req.body?.reload_prizes !== false,
-    });
+    const result = await runRestartMode(req);
     res.json({ ok: true, ...result, time: nowISO() });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -1577,7 +1617,7 @@ app.post("/event/reset", requireApiKey, async (req, res) => {
 
 app.post("/restart-spin", requireApiKey, async (req, res) => {
   try {
-    const result = await resetEventData({ reloadPrizes: true });
+    const result = await runRestartMode(req);
     res.json({ ok: true, ...result, time: nowISO() });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
