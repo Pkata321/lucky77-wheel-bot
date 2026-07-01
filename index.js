@@ -93,6 +93,11 @@ function keysForPrefix(prefix) {
     SCAN_LAST_SUMMARY: `${prefix}:scan:last_summary`,
     SPIN_LOCK: `${prefix}:spin:lock`,
     STOP_FORWARD: (uid) => `${prefix}:stop:forward:${uid}`,
+    EVENT_OPEN: `${prefix}:event:open`,
+    EVENT_LIMIT: `${prefix}:event:limit`,
+    EVENT_NAME: `${prefix}:event:name`,
+    AUDIT_LIST: `${prefix}:audit:list`,
+    BACKUP_LAST_AT: `${prefix}:backup:last_at`,
     
   };
 }
@@ -138,6 +143,11 @@ const KEY_SCAN_LAST_AT = K.SCAN_LAST_AT;
 const KEY_SCAN_LAST_SUMMARY = K.SCAN_LAST_SUMMARY;
 const KEY_SPIN_LOCK = K.SPIN_LOCK;
 const KEY_STOP_FORWARD = K.STOP_FORWARD;
+const KEY_EVENT_OPEN = K.EVENT_OPEN;
+const KEY_EVENT_LIMIT = K.EVENT_LIMIT;
+const KEY_EVENT_NAME = K.EVENT_NAME;
+const KEY_AUDIT_LIST = K.AUDIT_LIST;
+const KEY_BACKUP_LAST_AT = K.BACKUP_LAST_AT;
 
 /* ================= Bot ================= */
 const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
@@ -220,7 +230,7 @@ async function getStartUrl() {
 async function buildStartKeyboard(label) {
   const startUrl = await getStartUrl();
   if (!startUrl) return undefined;
-  const txt = String(label || "").trim() || "▶️ Register / Enable DM";
+  const txt = String(label || "").trim() || "â¶ï¸ Register / Enable DM";
   return { inline_keyboard: [[{ text: txt, url: startUrl }]] };
 }
 
@@ -313,6 +323,7 @@ async function maybeBackfillMemberIdentity(userId) {
       display,
       active: String(prev?.active ?? "1"),
       removed: String(prev?.removed || "0"),
+      rejoin_required: String(prev?.rejoin_required || "0"),
       left_at: String(prev?.left_at || ""),
       left_reason: String(prev?.left_reason || ""),
       dm_ready: String(prev?.dm_ready || "0"),
@@ -355,6 +366,9 @@ async function saveMember(u, source = "register") {
   const prevActive = String(prev?.active ?? "1");
   const prevLeftAt = String(prev?.left_at || "");
   const prevLeftReason = String(prev?.left_reason || "");
+  const isFreshRegister = String(source || "").includes("private_start") || String(source || "").includes("register");
+  const nextActive = isFreshRegister ? "1" : prevActive;
+  const nextRejoinRequired = isFreshRegister ? "0" : String(prev?.rejoin_required || "0");
 
   await redis.sadd(KEY_MEMBERS_SET, userId);
 
@@ -363,8 +377,9 @@ async function saveMember(u, source = "register") {
     name: nextName,
     username: nextUsername,
     display,
-    active: prevActive,
+    active: nextActive,
     removed: "0",
+    rejoin_required: nextRejoinRequired,
     left_at: prevLeftAt,
     left_reason: prevLeftReason,
     dm_ready: prevDmReady === "1" ? "1" : "0",
@@ -399,9 +414,11 @@ async function addToPoolIfEligible(userId) {
 
   const removed = String(h.removed || "0") === "1";
   const active = String(h.active ?? "1") === "1";
+  const rejoinRequired = String(h.rejoin_required || "0") === "1";
   const isWinner = await redis.sismember(KEY_WINNERS_SET, uid);
 
   if (removed) return { ok: false, reason: "removed" };
+  if (rejoinRequired) return { ok: false, reason: "rejoin_register_required" };
   if (!active) return { ok: false, reason: "inactive" };
   if (isWinner) return { ok: false, reason: "winner" };
 
@@ -418,6 +435,7 @@ async function markInactive(userId, reason = "left_channel") {
   await redis.hset(KEY_MEMBER_HASH(uid), {
     id: uid,
     active: "0",
+    rejoin_required: "1",
     left_at: nowISO(),
     left_reason: String(reason || "left_channel"),
   });
@@ -435,6 +453,7 @@ async function markRemoved(userId, reason = "owner_remove") {
     id: uid,
     removed: "1",
     active: "0",
+    rejoin_required: "1",
     left_reason: String(reason),
     left_at: nowISO(),
   });
@@ -445,8 +464,8 @@ async function markRemoved(userId, reason = "owner_remove") {
 async function getJoinGateLive() {
   const cap =
     (await readMaybe(KEY_JOIN_CAP)) ||
-    "❌ Channel ကို Join ပြီးမှ Register/Enable DM လုပ်နိုင်ပါသည်。\n\n👉 အောက်က Button နဲ့ Join လုပ်ပြီး ပြန်စစ်ပါ။";
-  const btn = (await readMaybe(KEY_JOIN_BTN)) || "📢 Join Channel";
+    "â Channel áá­á¯ Join áá¼á®á¸áá¾ Register/Enable DM áá¯ááºáá­á¯ááºáá«áááºã\n\nð á¡á±á¬ááºá Button áá²á· Join áá¯ááºáá¼á®á¸ áá¼ááºáááºáá«á";
+  const btn = (await readMaybe(KEY_JOIN_BTN)) || "ð¢ Join Channel";
   return { cap: String(cap), btn: String(btn) };
 }
 
@@ -456,7 +475,7 @@ async function sendJoinGate(chatId, userId) {
   const kb = {
     inline_keyboard: [
       ...(link ? [[{ text: live.btn, url: link }]] : []),
-      [{ text: "✅ Joined (Check Again)", callback_data: `chkch:${String(userId)}` }],
+      [{ text: "â Joined (Check Again)", callback_data: `chkch:${String(userId)}` }],
     ],
   };
   return bot.sendMessage(chatId, live.cap, { reply_markup: kb });
@@ -466,7 +485,7 @@ async function getRegisterLive() {
   return {
     cap:
       (await readMaybe(KEY_REG_CAP)) ||
-      "✅ Registered ပြီးပါပြီ。\n\n📩 Prize ပေါက်ရင် ဒီ DM ကနေ ဆက်သွယ်ပေးပါမယ်။",
+      "â Registered áá¼á®á¸áá«áá¼á®ã\n\nð© Prize áá±á«ááºáááº áá® DM ááá± áááºáá½ááºáá±á¸áá«áááºá",
     btn: (await readMaybe(KEY_REG_BTN)) || "",
     mode: (await readMaybe(KEY_REG_MODE)) || "text",
     file: (await readMaybe(KEY_REG_FILE)) || "",
@@ -498,6 +517,24 @@ async function sendRegisterDm(chatId) {
 }
 
 async function proceedRegisterAndReply(chatId, user) {
+  const event = await getEventSettings();
+  const uid = String(user?.id || "");
+  const prev = uid ? await redis.hgetall(KEY_MEMBER_HASH(uid)).catch(() => ({})) : {};
+  const alreadyEligible = prev && String(prev.active ?? "0") === "1" && String(prev.rejoin_required || "0") !== "1" && String(prev.removed || "0") !== "1";
+
+  if (!event.open && !alreadyEligible) {
+    await bot.sendMessage(chatId, "Event Register áá­ááºáá¬á¸áá«áááº Bossá áá±á¬ááº Event áá½áá·áºáá»á­ááºáá¾ áá¼ááº Register áá¯ááºáá­á¯ááºáá«áááºá");
+    return;
+  }
+
+  if (event.limit && !alreadyEligible) {
+    const current = await getActiveRegisterCount();
+    if (current >= event.limit) {
+      await bot.sendMessage(chatId, `Event Register áá¼áá·áºáá½á¬á¸áá«áá¼á®á (${current}/${event.limit})`);
+      return;
+    }
+  }
+
   const saved = await saveMember(user, "private_start");
   if (!saved?.ok) {
     await bot.sendMessage(chatId, "Register failed.");
@@ -505,6 +542,7 @@ async function proceedRegisterAndReply(chatId, user) {
   }
 
   await setDmReady(user.id);
+  await redis.hset(KEY_MEMBER_HASH(String(user.id)), { active: "1", removed: "0", rejoin_required: "0", left_at: "", left_reason: "" }).catch(() => {});
   await addToPoolIfEligible(user.id);
   await sendRegisterDm(chatId);
 }
@@ -592,6 +630,8 @@ async function buildStatusText() {
   const stgPostMode = await readMaybe(KEY_STG_POST_MODE);
   const stgPostFile = await readMaybe(KEY_STG_POST_FILE);
 
+  const eventSettings = await getEventSettings();
+  const activeRegisterCount = await getActiveRegisterCount();
   const members = Number((await redis.scard(KEY_MEMBERS_SET)) || 0);
   const pool = Number((await redis.scard(KEY_POOL_SET)) || 0);
   const winners = Number((await redis.scard(KEY_WINNERS_SET)) || 0);
@@ -633,6 +673,9 @@ mode: ${stgPostMode || "-"}
 file: ${stgPostFile ? "yes" : "no"}
 
 EVENT
+name: ${eventSettings.name}
+register: ${eventSettings.open ? "open" : "closed"}
+limit: ${eventSettings.limit ? `${activeRegisterCount}/${eventSettings.limit}` : "off"}
 members: ${members}
 pool: ${pool}
 winners: ${winners}
@@ -738,6 +781,37 @@ async function isForwardStopped(userId) {
   return !!v;
 }
 
+async function getEventSettings() {
+  const openRaw = await readMaybe(KEY_EVENT_OPEN);
+  const limitRaw = await readMaybe(KEY_EVENT_LIMIT);
+  const nameRaw = await readMaybe(KEY_EVENT_NAME);
+  return {
+    open: String(openRaw ?? "1") === "1",
+    limit: Math.max(0, Number(limitRaw || 0) || 0),
+    name: String(nameRaw || "Lucky77 Event"),
+  };
+}
+
+async function getActiveRegisterCount() {
+  const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
+  let count = 0;
+  for (const id of ids.map(String)) {
+    if (!id || isExcludedUser(id)) continue;
+    const h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
+    if (!h) continue;
+    if (String(h.removed || "0") === "1") continue;
+    if (String(h.rejoin_required || "0") === "1") continue;
+    if (String(h.active ?? "1") !== "1") continue;
+    count += 1;
+  }
+  return count;
+}
+
+async function audit(action, data = {}) {
+  const item = { at: nowISO(), action: String(action || "unknown"), data };
+  await redis.lpush(KEY_AUDIT_LIST, JSON.stringify(item)).catch(() => {});
+  await redis.ltrim(KEY_AUDIT_LIST, 0, 999).catch(() => {});
+}
 
 async function rebuildPoolFromCurrentMembers() {
   await redis.del(KEY_POOL_SET);
@@ -749,6 +823,7 @@ async function rebuildPoolFromCurrentMembers() {
     const h = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => null);
     if (!h) continue;
     if (String(h.removed || "0") === "1") continue;
+    if (String(h.rejoin_required || "0") === "1") continue;
     if (String(h.active ?? "1") !== "1") continue;
     const isWinner = await redis.sismember(KEY_WINNERS_SET, id);
     if (isWinner) continue;
@@ -798,6 +873,7 @@ async function importLegacyMembers() {
             display: String(uid),
             active: "1",
             removed: "0",
+            rejoin_required: "0",
             left_at: "",
             left_reason: "",
             dm_ready: "0",
@@ -823,6 +899,7 @@ async function importLegacyMembers() {
         display: String(cur?.display || "").trim() || legacyDisplay || String(uid),
         active: String(cur?.active ?? legacy?.active ?? "1"),
         removed: String(cur?.removed ?? legacy?.removed ?? "0"),
+        rejoin_required: String(cur?.rejoin_required ?? legacy?.rejoin_required ?? "0"),
         left_at: String(cur?.left_at || legacy?.left_at || ""),
         left_reason: String(cur?.left_reason || legacy?.left_reason || ""),
         dm_ready: String(cur?.dm_ready ?? legacy?.dm_ready ?? "0"),
@@ -865,6 +942,7 @@ async function runScanMembers() {
   let leftCount = 0;
   let skippedRemoved = 0;
   let unknownCount = 0;
+  let needsRegisterCount = 0;
   const scannedAt = nowISO();
 
   const chunkSize = 10;
@@ -896,6 +974,7 @@ if (!check.isMember) {
   await redis.hset(KEY_MEMBER_HASH(id), {
     id,
     active: "0",
+    rejoin_required: "1",
     left_at: scannedAt,
     left_reason: "left_channel",
     last_scan_at: scannedAt,
@@ -903,6 +982,16 @@ if (!check.isMember) {
   await redis.srem(KEY_POOL_SET, id);
   return { type: "left" };
 }
+
+        if (String(h.rejoin_required || "0") === "1") {
+          await redis.hset(KEY_MEMBER_HASH(id), {
+            id,
+            active: "0",
+            last_scan_at: scannedAt,
+          });
+          await redis.srem(KEY_POOL_SET, id);
+          return { type: "needs_register" };
+        }
 
         await redis.hset(KEY_MEMBER_HASH(id), {
           id,
@@ -922,6 +1011,7 @@ if (!check.isMember) {
   else if (r.type === "left") leftCount++;
   else if (r.type === "removed") skippedRemoved++;
   else if (r.type === "unknown") unknownCount++;
+  else if (r.type === "needs_register") needsRegisterCount++;
 }
   }
 
@@ -933,6 +1023,7 @@ if (!check.isMember) {
   left: leftCount,
   skipped_removed: skippedRemoved,
   unknown: unknownCount,
+  needs_register: needsRegisterCount,
   pool: poolCount,
 };
   await redis.set(KEY_SCAN_LAST_AT, scannedAt);
@@ -989,7 +1080,7 @@ async function resetEventData({ reloadPrizes = true } = {}) {
   await redis.del(KEY_POOL_SET);
   await redis.del(KEY_SPIN_LOCK).catch(() => {});
 
-  // restart ပြီးရင် scan ပြန်လုပ်ရမယ်
+  // restart áá¼á®á¸áááº scan áá¼ááºáá¯ááºááááº
   await redis.set(KEY_SCAN_STATUS, "idle").catch(() => {});
   await redis.del(KEY_SCAN_LAST_AT).catch(() => {});
   await redis.del(KEY_SCAN_LAST_SUMMARY).catch(() => {});
@@ -1001,9 +1092,9 @@ async function resetEventData({ reloadPrizes = true } = {}) {
     await redis.del(KEY_WINNER_META(id)).catch(() => {});
   }
 
-  // member memory မဖျက်ဘူး
-  // active/left record မဖျက်ဘူး
-  // pool ကို scan မလုပ်မချင်း empty ထားမယ်
+  // member memory ááá»ááºáá°á¸
+  // active/left record ááá»ááºáá°á¸
+  // pool áá­á¯ scan ááá¯ááºááá»ááºá¸ empty áá¬á¸áááº
 
   if (reloadPrizes) {
     await reloadPrizeBagFromSource();
@@ -1158,6 +1249,11 @@ async function buildWinnersList() {
       done_at: String(meta?.done_at || ""),
       notice_sent: String(meta?.notice_sent || "0") === "1",
       notice_at: String(meta?.notice_at || ""),
+      cs_status: String(meta?.cs_status || (String(meta?.done || "0") === "1" ? "done" : "pending")),
+      cs_note: String(meta?.cs_note || ""),
+      game_account: String(meta?.game_account || ""),
+      last_reply_text: String(meta?.last_reply_text || ""),
+      last_reply_at: String(meta?.last_reply_at || ""),
     };
   });
 
@@ -1172,16 +1268,29 @@ const allowedOrigins = String(process.env.ALLOWED_ORIGINS || "")
   .map((x) => x.trim())
   .filter(Boolean);
 
+function isAllowedCorsOrigin(origin) {
+  if (!origin) return true;
+  if (!allowedOrigins.length) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  // Emergency production safety: allow Vercel preview/production frontends without editing Render env every deploy.
+  try {
+    const u = new URL(origin);
+    if (u.hostname === "vercel.app" || u.hostname.endsWith(".vercel.app")) return true;
+    if (u.hostname === "localhost" || u.hostname === "127.0.0.1") return true;
+  } catch (_) {}
+  return false;
+}
+
 app.use(cors({
   origin(origin, cb) {
-    if (!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true);
+    if (isAllowedCorsOrigin(origin)) return cb(null, true);
     return cb(new Error("CORS origin not allowed"));
   },
   credentials: true,
 }));
 app.use(express.json({ limit: "6mb" }));
 
-app.get("/", (req, res) => res.send("Lucky77 Wheel Bot ✅"));
+app.get("/", (req, res) => res.send("Lucky77 Wheel Bot â"));
 
 app.get("/health", async (req, res) => {
   try {
@@ -1194,6 +1303,8 @@ app.get("/health", async (req, res) => {
       pool: Number((await redis.scard(KEY_POOL_SET)) || 0),
       remaining_prizes: Number((await redis.llen(KEY_PRIZE_BAG)) || 0),
       scan_status: String((await readMaybe(KEY_SCAN_STATUS)) || "idle"),
+      event: await getEventSettings(),
+      active_register_count: await getActiveRegisterCount(),
       last_scan_at: String((await readMaybe(KEY_SCAN_LAST_AT)) || ""),
       channel_gate: {
         enabled: !!CHANNEL_CHAT,
@@ -1213,6 +1324,8 @@ app.get("/config", requireApiKey, async (req, res) => {
     res.json({
       ok: true,
       prize_source: String(prizeSource || ""),
+      event: await getEventSettings(),
+      active_register_count: await getActiveRegisterCount(),
       scan_status: String((await readMaybe(KEY_SCAN_STATUS)) || "idle"),
       last_scan_at: String((await readMaybe(KEY_SCAN_LAST_AT)) || ""),
       time: nowISO(),
@@ -1268,6 +1381,7 @@ app.get("/members", requireApiKey, async (req, res) => {
             display: String(id),
             active: "1",
             removed: "0",
+            rejoin_required: "0",
             left_at: "",
             left_reason: "",
             dm_ready: "0",
@@ -1296,8 +1410,9 @@ app.get("/members", requireApiKey, async (req, res) => {
         }
 
         display = display || deriveDisplay(name, username, id);
-        const active = String(h.active ?? "1") === "1";
-        const status = removed ? "removed" : active ? "active" : "left";
+        const rejoin_required = String(h.rejoin_required || "0") === "1";
+        const active = String(h.active ?? "1") === "1" && !rejoin_required;
+        const status = removed ? "removed" : rejoin_required ? "needs_register" : active ? "active" : "left";
 
         return {
           id: String(h.id || id),
@@ -1307,6 +1422,7 @@ app.get("/members", requireApiKey, async (req, res) => {
           active,
           status,
           removed,
+          rejoin_required,
           left_at: String(h.left_at || ""),
           left_reason: String(h.left_reason || ""),
           dm_ready: String(h.dm_ready || "0") === "1",
@@ -1396,6 +1512,11 @@ app.get("/winners/cs", requireApiKey, async (req, res) => {
       done_at: x.done_at,
       notice_sent: x.notice_sent,
       notice_at: x.notice_at,
+      cs_status: x.cs_status,
+      cs_note: x.cs_note,
+      game_account: x.game_account,
+      last_reply_text: x.last_reply_text,
+      last_reply_at: x.last_reply_at,
     }));
 
     res.json({ ok: true, total: csList.length, winners: csList });
@@ -1426,9 +1547,66 @@ app.post("/winner/done", requireApiKey, async (req, res) => {
     await redis.hset(metaKey, {
       done: nextDone ? "1" : "0",
       done_at: nowISO(),
+      cs_status: nextDone ? "done" : "pending",
     });
+    await audit("winner_done_toggle", { user_id: uid, done: nextDone });
 
     res.json({ ok: true, user_id: uid, done: nextDone });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+
+app.post("/winner/update", requireApiKey, async (req, res) => {
+  try {
+    const uid = String(req.body?.user_id || "").trim();
+    if (!uid) return res.status(400).json({ ok: false, error: "user_id required" });
+
+    const metaKey = KEY_WINNER_META(uid);
+    const meta = await redis.hgetall(metaKey).catch(() => ({}));
+    if (!meta || !meta.turn) {
+      return res.status(404).json({ ok: false, error: "winner_not_found" });
+    }
+
+    const allowed = new Set(["pending", "notice_sent", "user_replied", "account_received", "prize_added", "problem", "done"]);
+    const csStatus = String(req.body?.cs_status || meta?.cs_status || "pending").trim();
+    const next = {
+      cs_status: allowed.has(csStatus) ? csStatus : "pending",
+      cs_note: String(req.body?.cs_note ?? meta?.cs_note ?? "").slice(0, 1000),
+      game_account: String(req.body?.game_account ?? meta?.game_account ?? "").slice(0, 300),
+      updated_at: nowISO(),
+    };
+
+    if (next.cs_status === "done") {
+      next.done = "1";
+      next.done_at = String(meta?.done_at || "") || nowISO();
+    }
+
+    await redis.hset(metaKey, next);
+    await audit("winner_update", { user_id: uid, cs_status: next.cs_status });
+    res.json({ ok: true, user_id: uid, ...next });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+
+app.get("/event/settings", requireApiKey, async (req, res) => {
+  try {
+    res.json({ ok: true, event: await getEventSettings(), active_register_count: await getActiveRegisterCount() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post("/event/settings", requireApiKey, async (req, res) => {
+  try {
+    if (typeof req.body?.open !== "undefined") await redis.set(KEY_EVENT_OPEN, req.body.open ? "1" : "0");
+    if (typeof req.body?.limit !== "undefined") await redis.set(KEY_EVENT_LIMIT, String(Math.max(0, Number(req.body.limit || 0) || 0)));
+    if (typeof req.body?.name !== "undefined") await redis.set(KEY_EVENT_NAME, String(req.body.name || "Lucky77 Event"));
+    await audit("event_settings", await getEventSettings());
+    res.json({ ok: true, event: await getEventSettings(), active_register_count: await getActiveRegisterCount() });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -1492,7 +1670,7 @@ app.post("/spin", requireApiKey, async (req, res) => {
 
     const idx = Math.floor(Math.random() * Number(bagLen));
     let prize = await redis.lindex(KEY_PRIZE_BAG, idx).catch(() => null);
-    if (!prize) prize = await redis.lindex(KEY_PRIZE_BAG, 0).catch(() => "—");
+    if (!prize) prize = await redis.lindex(KEY_PRIZE_BAG, 0).catch(() => "â");
     prize = String(prize);
 
     const h = await redis.hgetall(KEY_MEMBER_HASH(String(winnerId))).catch(() => ({}));
@@ -1546,6 +1724,7 @@ app.post("/spin", requireApiKey, async (req, res) => {
       notice_at: String(h?.notice_at || ""),
     });
 
+    await audit("spin", { turn, prize, winner: winnerObj });
     await redis.del(KEY_SPIN_LOCK).catch(() => {});
     res.json({ ok: true, prize, winner: winnerObj, turn });
   } catch (e) {
@@ -1565,9 +1744,9 @@ app.post("/notice", requireApiKey, async (req, res) => {
     const msgText =
       text && String(text).trim()
         ? String(text)
-        : "Congratulation 🥳🥳🥳ပါအကိုရှင့်\n" +
-          `လက်ကီး77 ရဲ့ လစဉ်ဗလာမပါလက်ကီးဝှီး အစီစဉ်မှာ ယူနစ် ${pz || "—"} ကံထူးသွားပါတယ်ရှင့်☘️\n` +
-          "ဂိမ်းယူနစ်လေး ထည့်ပေးဖို့ အကို့ဂိမ်းအကောင့်လေး ပို့ပေးပါရှင့်";
+        : "\u1002\u102f\u100f\u103a\u101a\u1030\u1015\u102b\u1010\u101a\u103a \u1021\u1000\u102d\u102f\u101b\u103e\u1004\u1037\u103a" + "\n" +
+          "Lucky77 \u101c\u1005\u1009\u103a Lucky Wheel \u1021\u1005\u102e\u1021\u1005\u1009\u103a\u1019\u103e\u102c \u101a\u1030\u1014\u1005\u103a " + `${pz || "â"}` + " \u1000\u1036\u1011\u1030\u1038\u101e\u103d\u102c\u1038\u1015\u102b\u1010\u101a\u103a\u101b\u103e\u1004\u1037\u103a" + "\n" +
+          "\u1002\u102d\u1019\u103a\u1038\u101a\u1030\u1014\u1005\u103a\u1011\u100a\u1037\u103a\u1015\u1031\u1038\u101b\u1014\u103a \u1021\u1000\u102d\u102f\u1037\u1002\u102d\u1019\u103a\u1038\u1021\u1000\u1031\u102c\u1004\u1037\u103a ID \u101c\u1031\u1038 \u1015\u103c\u1014\u103a\u1015\u102d\u102f\u1037\u1015\u1031\u1038\u1015\u102b\u101b\u103e\u1004\u1037\u103a";
 
   await redis.set(
   KEY_NOTICE_CTX(uid),
@@ -1586,7 +1765,9 @@ await redis.del(KEY_STOP_FORWARD(uid)).catch(() => {});
       await redis.hset(KEY_WINNER_META(uid), {
         notice_sent: "1",
         notice_at: nowISO(),
+        cs_status: "notice_sent",
       }).catch(() => {});
+      await audit("notice_sent", { user_id: uid, prize: pz });
     }
 
     res.json({
@@ -1594,6 +1775,101 @@ await redis.del(KEY_STOP_FORWARD(uid)).catch(() => {});
       dm_ok: dm.ok,
       dm_error: dm.ok ? "" : String(dm.error || ""),
     });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+
+async function buildBackupPayload() {
+  const ids = ((await redis.smembers(KEY_MEMBERS_SET)) || []).map(String);
+  const members = {};
+  for (const id of ids) members[id] = await redis.hgetall(KEY_MEMBER_HASH(id)).catch(() => ({}));
+
+  const winnerIds = ((await redis.smembers(KEY_WINNERS_SET)) || []).map(String);
+  const winner_meta = {};
+  for (const id of winnerIds) winner_meta[id] = await redis.hgetall(KEY_WINNER_META(id)).catch(() => ({}));
+
+  return {
+    version: "premium-v4",
+    exported_at: nowISO(),
+    prefix: KEY_PREFIX,
+    event: await getEventSettings(),
+    members_set: ids,
+    members,
+    pool_set: ((await redis.smembers(KEY_POOL_SET)) || []).map(String),
+    winners_set: winnerIds,
+    winner_meta,
+    history_list: (await redis.lrange(KEY_HISTORY_LIST, 0, -1)) || [],
+    prize_source: String((await readMaybe(KEY_PRIZE_SOURCE)) || ""),
+    prize_bag: (await redis.lrange(KEY_PRIZE_BAG, 0, -1)) || [],
+    turn_seq: String((await readMaybe(KEY_TURN_SEQ)) || "0"),
+    live_texts: {
+      join_cap: String((await readMaybe(KEY_JOIN_CAP)) || ""),
+      join_btn: String((await readMaybe(KEY_JOIN_BTN)) || ""),
+      reg_cap: String((await readMaybe(KEY_REG_CAP)) || ""),
+      reg_btn: String((await readMaybe(KEY_REG_BTN)) || ""),
+      reg_mode: String((await readMaybe(KEY_REG_MODE)) || "text"),
+      reg_file: String((await readMaybe(KEY_REG_FILE)) || ""),
+    },
+  };
+}
+
+async function restoreBackupPayload(payload) {
+  if (!payload || typeof payload !== "object") throw new Error("invalid_backup_json");
+  await resetEventData({ reloadPrizes: false });
+  await redis.del(KEY_MEMBERS_SET, KEY_POOL_SET, KEY_WINNERS_SET, KEY_HISTORY_LIST, KEY_PRIZE_BAG).catch(() => {});
+
+  const members = payload.members || {};
+  const memberIds = Array.isArray(payload.members_set) ? payload.members_set.map(String) : Object.keys(members).map(String);
+  for (const id of memberIds) {
+    if (!id || isExcludedUser(id)) continue;
+    await redis.sadd(KEY_MEMBERS_SET, id);
+    await redis.hset(KEY_MEMBER_HASH(id), { id, ...(members[id] || {}) });
+  }
+
+  for (const id of (payload.pool_set || []).map(String)) if (id && !isExcludedUser(id)) await redis.sadd(KEY_POOL_SET, id);
+  for (const id of (payload.winners_set || []).map(String)) if (id) await redis.sadd(KEY_WINNERS_SET, id);
+  for (const [id, meta] of Object.entries(payload.winner_meta || {})) await redis.hset(KEY_WINNER_META(id), meta || {});
+  for (const item of payload.history_list || []) await redis.rpush(KEY_HISTORY_LIST, item);
+  for (const pz of payload.prize_bag || []) await redis.rpush(KEY_PRIZE_BAG, String(pz));
+  if (payload.prize_source) await redis.set(KEY_PRIZE_SOURCE, String(payload.prize_source));
+  if (payload.turn_seq) await redis.set(KEY_TURN_SEQ, String(payload.turn_seq));
+  if (payload.event) {
+    await redis.set(KEY_EVENT_OPEN, payload.event.open ? "1" : "0");
+    await redis.set(KEY_EVENT_LIMIT, String(Math.max(0, Number(payload.event.limit || 0) || 0)));
+    await redis.set(KEY_EVENT_NAME, String(payload.event.name || "Lucky77 Event"));
+  }
+  if (payload.live_texts) {
+    const t = payload.live_texts;
+    if (t.join_cap) await redis.set(KEY_JOIN_CAP, String(t.join_cap));
+    if (t.join_btn) await redis.set(KEY_JOIN_BTN, String(t.join_btn));
+    if (t.reg_cap) await redis.set(KEY_REG_CAP, String(t.reg_cap));
+    if (t.reg_btn !== undefined) await redis.set(KEY_REG_BTN, String(t.reg_btn));
+    if (t.reg_mode) await redis.set(KEY_REG_MODE, String(t.reg_mode));
+    if (t.reg_file !== undefined) await redis.set(KEY_REG_FILE, String(t.reg_file));
+  }
+  await redis.set(KEY_BACKUP_LAST_AT, nowISO()).catch(() => {});
+  return { members: memberIds.length, pool: Number((await redis.scard(KEY_POOL_SET)) || 0), winners: Number((await redis.scard(KEY_WINNERS_SET)) || 0) };
+}
+
+app.get("/backup/export", requireApiKey, async (req, res) => {
+  try {
+    const payload = await buildBackupPayload();
+    await redis.set(KEY_BACKUP_LAST_AT, payload.exported_at).catch(() => {});
+    await audit("backup_export", { members: payload.members_set.length, winners: payload.winners_set.length });
+    res.json({ ok: true, backup: payload });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post("/backup/restore", requireApiKey, async (req, res) => {
+  try {
+    const payload = req.body?.backup || req.body;
+    const r = await restoreBackupPayload(payload);
+    await audit("backup_restore", r);
+    res.json({ ok: true, ...r, time: nowISO() });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -1698,7 +1974,7 @@ bot.onText(/\/regvideo/, async (msg) => {
 bot.onText(/\/upload$/, async (msg) => {
   if (!ownerOnly(msg)) return;
   await applyUpload();
-  bot.sendMessage(msg.chat.id, "Upload apply complete ✅");
+  bot.sendMessage(msg.chat.id, "Upload apply complete â");
 });
 
 bot.onText(/\/postchannelcaption(?:\s+([\s\S]+))?/, async (msg, match) => {
@@ -1739,7 +2015,7 @@ bot.onText(/\/uploadchannelpost$/, async (msg) => {
   if (!ownerOnly(msg)) return;
   try {
     await sendChannelPostFromStage();
-    bot.sendMessage(msg.chat.id, "Channel post uploaded ✅");
+    bot.sendMessage(msg.chat.id, "Channel post uploaded â");
   } catch (e) {
     bot.sendMessage(msg.chat.id, `Channel post error: ${e?.message || e}`);
   }
@@ -1755,13 +2031,13 @@ bot.onText(/\/scanmembers$/, async (msg) => {
   if (!ownerOnly(msg)) return;
 
   try {
-    await bot.sendMessage(msg.chat.id, "Scanning members... ⏳");
+    await bot.sendMessage(msg.chat.id, "Scanning members... â³");
 
     const summary = await runScanMembers();
 
     await bot.sendMessage(
   msg.chat.id,
-  `Scan complete ✅\n` +
+  `Scan complete â\n` +
   `Active: ${summary.active}\n` +
   `Left: ${summary.left}\n` +
   `Skipped removed: ${summary.skipped_removed}\n` +
@@ -1774,18 +2050,55 @@ bot.onText(/\/scanmembers$/, async (msg) => {
   }
 });
 
+bot.onText(/\/openevent$/, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  await redis.set(KEY_EVENT_OPEN, "1");
+  bot.sendMessage(msg.chat.id, "Event register opened â");
+});
+
+bot.onText(/\/closeevent$/, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  await redis.set(KEY_EVENT_OPEN, "0");
+  bot.sendMessage(msg.chat.id, "Event register closed â");
+});
+
+bot.onText(/\/setlimit(?:\s+(\d+))?$/, async (msg, match) => {
+  if (!ownerOnly(msg)) return;
+  const limit = Math.max(0, Number(match?.[1] || 0) || 0);
+  await redis.set(KEY_EVENT_LIMIT, String(limit));
+  bot.sendMessage(msg.chat.id, limit ? `Register limit set: ${limit}` : "Register limit off â");
+});
+
+bot.onText(/\/eventstats$/, async (msg) => {
+  if (!ownerOnly(msg)) return;
+  const e = await getEventSettings();
+  const activeRegisterCount = await getActiveRegisterCount();
+  const members = Number((await redis.scard(KEY_MEMBERS_SET)) || 0);
+  const pool = Number((await redis.scard(KEY_POOL_SET)) || 0);
+  const winners = Number((await redis.scard(KEY_WINNERS_SET)) || 0);
+  const prizes = Number((await redis.llen(KEY_PRIZE_BAG)) || 0);
+  bot.sendMessage(msg.chat.id, `ð Event Stats
+Name: ${e.name}
+Register: ${e.open ? "OPEN" : "CLOSED"}
+Limit: ${e.limit ? `${activeRegisterCount}/${e.limit}` : "OFF"}
+Members Memory: ${members}
+Pool: ${pool}
+Winners: ${winners}
+Prizes Left: ${prizes}`);
+});
+
 bot.onText(/\/allrestart$/, async (msg) => {
   if (!ownerOnly(msg)) return;
   const r = await resetEventData({ reloadPrizes: true });
   bot.sendMessage(
     msg.chat.id,
-    `All restart complete ✅\nPool: ${r.pool}\nPrizes: ${r.remaining_prizes}`
+    `All restart complete â\nPool: ${r.pool}\nPrizes: ${r.remaining_prizes}`
   );
 });
 /* syncmembers = optional identity backfill only */
 bot.onText(/\/syncmembers$/, async (msg) => {
   if (!ownerOnly(msg)) return;
-  if (!CHANNEL_CHAT) return bot.sendMessage(msg.chat.id, "CHANNEL_CHAT မရှိသေးပါ");
+  if (!CHANNEL_CHAT) return bot.sendMessage(msg.chat.id, "CHANNEL_CHAT ááá¾á­áá±á¸áá«");
 
   try {
     const ids = (await redis.smembers(KEY_MEMBERS_SET)) || [];
@@ -1816,7 +2129,7 @@ bot.onText(/\/importlegacy$/, async (msg) => {
     const r = await importLegacyMembers();
     bot.sendMessage(
       msg.chat.id,
-      `Legacy import complete ✅\nImported: ${r.imported}\nMerged: ${r.merged}\nPlaceholders: ${r.placeholders}\nSkipped: ${r.skipped}\nPool: ${r.pool}`
+      `Legacy import complete â\nImported: ${r.imported}\nMerged: ${r.merged}\nPlaceholders: ${r.placeholders}\nSkipped: ${r.skipped}\nPool: ${r.pool}`
     );
   } catch (e) {
     bot.sendMessage(msg.chat.id, `Import error: ${e?.message || e}`);
@@ -1870,7 +2183,7 @@ bot.on("callback_query", async (q) => {
   const expectedUserId = data.split(":")[1] || "";
   if (fromId !== String(expectedUserId)) {
     await bot.answerCallbackQuery(q.id, {
-      text: "ဒီခလုတ်က သင့်အတွက်မဟုတ်ပါ။",
+      text: "áá®ááá¯ááºá áááºá·á¡áá½ááºááá¯ááºáá«á",
       show_alert: true,
     });
     return;
@@ -1880,7 +2193,7 @@ bot.on("callback_query", async (q) => {
 
   if (!check.ok) {
     await bot.answerCallbackQuery(q.id, {
-      text: "Channel check ခဏမအောင်မြင်ပါ။ ထပ်စမ်းပါ။",
+      text: "Channel check áááá¡á±á¬ááºáá¼ááºáá«á áááºáááºá¸áá«á",
       show_alert: true,
     });
     return;
@@ -1925,12 +2238,18 @@ bot.on("message", async (msg) => {
 
     const { name, username } = nameParts(msg.from);
     const header =
-      "📨 Winner Reply (Auto Forward)\n" +
-      `• Name: ${name || "-"}\n` +
-      `• Username: ${username ? "@" + username.replace(/^@+/, "") : "-"}\n` +
-      `• ID: ${uid}\n` +
-      `• Prize: ${ctx?.prize || "-"}\n` +
-      `• At: ${ctx?.at || "-"}`;
+      "ð¨ Winner Reply (Auto Forward)\n" +
+      `â¢ Name: ${name || "-"}\n` +
+      `â¢ Username: ${username ? "@" + username.replace(/^@+/, "") : "-"}\n` +
+      `â¢ ID: ${uid}\n` +
+      `â¢ Prize: ${ctx?.prize || "-"}\n` +
+      `â¢ At: ${ctx?.at || "-"}`;
+
+    await redis.hset(KEY_WINNER_META(uid), {
+      cs_status: "user_replied",
+      last_reply_text: String(msg.text || msg.caption || msg.content_type || "").slice(0, 1000),
+      last_reply_at: nowISO(),
+    }).catch(() => {});
 
     await bot.sendMessage(Number(OWNER_ID), header).catch(() => {});
     await bot.forwardMessage(Number(OWNER_ID), msg.chat.id, msg.message_id).catch(() => {});
@@ -1951,7 +2270,7 @@ bot.onText(/^\/start(?:\s+(.+))?/i, async (msg) => {
   if (!check.ok) {
     await bot.sendMessage(
       msg.chat.id,
-      "Channel member check ခဏမအောင်မြင်ပါ။ နောက်တစ်ခါပြန်စမ်းပါ။"
+      "Channel member check áááá¡á±á¬ááºáá¼ááºáá«á áá±á¬ááºáááºáá«áá¼ááºáááºá¸áá«á"
     );
     return;
   }
@@ -1976,33 +2295,36 @@ async function boot() {
   if (!(await redis.get(KEY_JOIN_CAP))) {
     await redis.set(
       KEY_JOIN_CAP,
-      "❌ Channel ကို Join ပြီးမှ Register/Enable DM လုပ်နိုင်ပါသည်。\n\n👉 အောက်က Button နဲ့ Join လုပ်ပြီး ပြန်စစ်ပါ။"
+      "â Channel áá­á¯ Join áá¼á®á¸áá¾ Register/Enable DM áá¯ááºáá­á¯ááºáá«áááºã\n\nð á¡á±á¬ááºá Button áá²á· Join áá¯ááºáá¼á®á¸ áá¼ááºáááºáá«á"
     );
   }
-  if (!(await redis.get(KEY_JOIN_BTN))) await redis.set(KEY_JOIN_BTN, "📢 Join Channel");
+  if (!(await redis.get(KEY_JOIN_BTN))) await redis.set(KEY_JOIN_BTN, "ð¢ Join Channel");
 
   if (!(await redis.get(KEY_REG_MODE))) await redis.set(KEY_REG_MODE, "text");
   if (!(await redis.get(KEY_REG_CAP))) {
     await redis.set(
       KEY_REG_CAP,
-      "✅ Registered ပြီးပါပြီ。\n\n📩 Prize ပေါက်ရင် ဒီ DM ကနေ ဆက်သွယ်ပေးပါမယ်။"
+      "â Registered áá¼á®á¸áá«áá¼á®ã\n\nð© Prize áá±á«ááºáááº áá® DM ááá± áááºáá½ááºáá±á¸áá«áááºá"
     );
   }
   if (!(await redis.get(KEY_REG_BTN))) await redis.set(KEY_REG_BTN, "");
   if (!(await redis.get(KEY_SCAN_STATUS))) await redis.set(KEY_SCAN_STATUS, "idle");
+  if (!(await redis.get(KEY_EVENT_OPEN))) await redis.set(KEY_EVENT_OPEN, "1");
+  if (!(await redis.get(KEY_EVENT_LIMIT))) await redis.set(KEY_EVENT_LIMIT, "0");
+  if (!(await redis.get(KEY_EVENT_NAME))) await redis.set(KEY_EVENT_NAME, "Lucky77 Event");
 
   const importResult = await importLegacyMembers().catch((e) => {
     console.error("legacy import error:", e);
     return null;
   });
   if (importResult) {
-    console.log("Legacy import ✅", importResult);
+    console.log("Legacy import â", importResult);
   }
 
   await setupWebhook();
-  console.log("Webhook set ✅", `${PUBLIC_URL}${WEBHOOK_PATH}`);
-  console.log("Current prefix ✅", KEY_PREFIX);
-  console.log("Legacy prefixes ✅", LEGACY_PREFIX_LIST);
+  console.log("Webhook set â", `${PUBLIC_URL}${WEBHOOK_PATH}`);
+  console.log("Current prefix â", KEY_PREFIX);
+  console.log("Legacy prefixes â", LEGACY_PREFIX_LIST);
 }
 
 const PORT = process.env.PORT || 10000;
@@ -2014,4 +2336,3 @@ app.listen(PORT, "0.0.0.0", async () => {
     console.error("Boot error:", e);
   }
 });
-
